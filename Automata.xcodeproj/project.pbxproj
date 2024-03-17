@@ -1,0 +1,578 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		01CBB1102BA68E1400BB7BB6 /* AutomataApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CBB10F2BA68E1400BB7BB6 /* AutomataApp.swift */; };
+		01CBB1122BA68E1400BB7BB6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CBB1112BA68E1400BB7BB6 /* ContentView.swift */; };
+		01CBB1142BA68E1500BB7BB6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 01CBB1132BA68E1500BB7BB6 /* Assets.xcassets */; };
+		01CBB1172BA68E1500BB7BB6 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 01CBB1162BA68E1500BB7BB6 /* Preview Assets.xcassets */; };
+		01CBB1222BA68E1500BB7BB6 /* AutomataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CBB1212BA68E1500BB7BB6 /* AutomataTests.swift */; };
+		01CBB12C2BA68E1500BB7BB6 /* AutomataUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CBB12B2BA68E1500BB7BB6 /* AutomataUITests.swift */; };
+		01CBB12E2BA68E1500BB7BB6 /* AutomataUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CBB12D2BA68E1500BB7BB6 /* AutomataUITestsLaunchTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		01CBB11E2BA68E1500BB7BB6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 01CBB1042BA68E1400BB7BB6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 01CBB10B2BA68E1400BB7BB6;
+			remoteInfo = Automata;
+		};
+		01CBB1282BA68E1500BB7BB6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 01CBB1042BA68E1400BB7BB6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 01CBB10B2BA68E1400BB7BB6;
+			remoteInfo = Automata;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		01CBB10C2BA68E1400BB7BB6 /* Automata.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Automata.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		01CBB10F2BA68E1400BB7BB6 /* AutomataApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomataApp.swift; sourceTree = "<group>"; };
+		01CBB1112BA68E1400BB7BB6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		01CBB1132BA68E1500BB7BB6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		01CBB1162BA68E1500BB7BB6 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		01CBB1182BA68E1500BB7BB6 /* Automata.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Automata.entitlements; sourceTree = "<group>"; };
+		01CBB11D2BA68E1500BB7BB6 /* AutomataTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AutomataTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		01CBB1212BA68E1500BB7BB6 /* AutomataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomataTests.swift; sourceTree = "<group>"; };
+		01CBB1272BA68E1500BB7BB6 /* AutomataUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AutomataUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		01CBB12B2BA68E1500BB7BB6 /* AutomataUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomataUITests.swift; sourceTree = "<group>"; };
+		01CBB12D2BA68E1500BB7BB6 /* AutomataUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomataUITestsLaunchTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		01CBB1092BA68E1400BB7BB6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB11A2BA68E1500BB7BB6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB1242BA68E1500BB7BB6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		01CBB1032BA68E1400BB7BB6 = {
+			isa = PBXGroup;
+			children = (
+				01CBB10E2BA68E1400BB7BB6 /* Automata */,
+				01CBB1202BA68E1500BB7BB6 /* AutomataTests */,
+				01CBB12A2BA68E1500BB7BB6 /* AutomataUITests */,
+				01CBB10D2BA68E1400BB7BB6 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		01CBB10D2BA68E1400BB7BB6 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				01CBB10C2BA68E1400BB7BB6 /* Automata.app */,
+				01CBB11D2BA68E1500BB7BB6 /* AutomataTests.xctest */,
+				01CBB1272BA68E1500BB7BB6 /* AutomataUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		01CBB10E2BA68E1400BB7BB6 /* Automata */ = {
+			isa = PBXGroup;
+			children = (
+				01CBB10F2BA68E1400BB7BB6 /* AutomataApp.swift */,
+				01CBB1112BA68E1400BB7BB6 /* ContentView.swift */,
+				01CBB1132BA68E1500BB7BB6 /* Assets.xcassets */,
+				01CBB1182BA68E1500BB7BB6 /* Automata.entitlements */,
+				01CBB1152BA68E1500BB7BB6 /* Preview Content */,
+			);
+			path = Automata;
+			sourceTree = "<group>";
+		};
+		01CBB1152BA68E1500BB7BB6 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				01CBB1162BA68E1500BB7BB6 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		01CBB1202BA68E1500BB7BB6 /* AutomataTests */ = {
+			isa = PBXGroup;
+			children = (
+				01CBB1212BA68E1500BB7BB6 /* AutomataTests.swift */,
+			);
+			path = AutomataTests;
+			sourceTree = "<group>";
+		};
+		01CBB12A2BA68E1500BB7BB6 /* AutomataUITests */ = {
+			isa = PBXGroup;
+			children = (
+				01CBB12B2BA68E1500BB7BB6 /* AutomataUITests.swift */,
+				01CBB12D2BA68E1500BB7BB6 /* AutomataUITestsLaunchTests.swift */,
+			);
+			path = AutomataUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		01CBB10B2BA68E1400BB7BB6 /* Automata */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 01CBB1312BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "Automata" */;
+			buildPhases = (
+				01CBB1082BA68E1400BB7BB6 /* Sources */,
+				01CBB1092BA68E1400BB7BB6 /* Frameworks */,
+				01CBB10A2BA68E1400BB7BB6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Automata;
+			productName = Automata;
+			productReference = 01CBB10C2BA68E1400BB7BB6 /* Automata.app */;
+			productType = "com.apple.product-type.application";
+		};
+		01CBB11C2BA68E1500BB7BB6 /* AutomataTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 01CBB1342BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "AutomataTests" */;
+			buildPhases = (
+				01CBB1192BA68E1500BB7BB6 /* Sources */,
+				01CBB11A2BA68E1500BB7BB6 /* Frameworks */,
+				01CBB11B2BA68E1500BB7BB6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				01CBB11F2BA68E1500BB7BB6 /* PBXTargetDependency */,
+			);
+			name = AutomataTests;
+			productName = AutomataTests;
+			productReference = 01CBB11D2BA68E1500BB7BB6 /* AutomataTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		01CBB1262BA68E1500BB7BB6 /* AutomataUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 01CBB1372BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "AutomataUITests" */;
+			buildPhases = (
+				01CBB1232BA68E1500BB7BB6 /* Sources */,
+				01CBB1242BA68E1500BB7BB6 /* Frameworks */,
+				01CBB1252BA68E1500BB7BB6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				01CBB1292BA68E1500BB7BB6 /* PBXTargetDependency */,
+			);
+			name = AutomataUITests;
+			productName = AutomataUITests;
+			productReference = 01CBB1272BA68E1500BB7BB6 /* AutomataUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		01CBB1042BA68E1400BB7BB6 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1530;
+				LastUpgradeCheck = 1530;
+				TargetAttributes = {
+					01CBB10B2BA68E1400BB7BB6 = {
+						CreatedOnToolsVersion = 15.3;
+					};
+					01CBB11C2BA68E1500BB7BB6 = {
+						CreatedOnToolsVersion = 15.3;
+						TestTargetID = 01CBB10B2BA68E1400BB7BB6;
+					};
+					01CBB1262BA68E1500BB7BB6 = {
+						CreatedOnToolsVersion = 15.3;
+						TestTargetID = 01CBB10B2BA68E1400BB7BB6;
+					};
+				};
+			};
+			buildConfigurationList = 01CBB1072BA68E1400BB7BB6 /* Build configuration list for PBXProject "Automata" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 01CBB1032BA68E1400BB7BB6;
+			productRefGroup = 01CBB10D2BA68E1400BB7BB6 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				01CBB10B2BA68E1400BB7BB6 /* Automata */,
+				01CBB11C2BA68E1500BB7BB6 /* AutomataTests */,
+				01CBB1262BA68E1500BB7BB6 /* AutomataUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		01CBB10A2BA68E1400BB7BB6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01CBB1172BA68E1500BB7BB6 /* Preview Assets.xcassets in Resources */,
+				01CBB1142BA68E1500BB7BB6 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB11B2BA68E1500BB7BB6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB1252BA68E1500BB7BB6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		01CBB1082BA68E1400BB7BB6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01CBB1122BA68E1400BB7BB6 /* ContentView.swift in Sources */,
+				01CBB1102BA68E1400BB7BB6 /* AutomataApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB1192BA68E1500BB7BB6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01CBB1222BA68E1500BB7BB6 /* AutomataTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		01CBB1232BA68E1500BB7BB6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01CBB12E2BA68E1500BB7BB6 /* AutomataUITestsLaunchTests.swift in Sources */,
+				01CBB12C2BA68E1500BB7BB6 /* AutomataUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		01CBB11F2BA68E1500BB7BB6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 01CBB10B2BA68E1400BB7BB6 /* Automata */;
+			targetProxy = 01CBB11E2BA68E1500BB7BB6 /* PBXContainerItemProxy */;
+		};
+		01CBB1292BA68E1500BB7BB6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 01CBB10B2BA68E1400BB7BB6 /* Automata */;
+			targetProxy = 01CBB1282BA68E1500BB7BB6 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		01CBB12F2BA68E1500BB7BB6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		01CBB1302BA68E1500BB7BB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		01CBB1322BA68E1500BB7BB6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Automata/Automata.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Automata/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.Automata;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		01CBB1332BA68E1500BB7BB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Automata/Automata.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Automata/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.Automata;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		01CBB1352BA68E1500BB7BB6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.AutomataTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Automata.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Automata";
+			};
+			name = Debug;
+		};
+		01CBB1362BA68E1500BB7BB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.AutomataTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Automata.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Automata";
+			};
+			name = Release;
+		};
+		01CBB1382BA68E1500BB7BB6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.AutomataUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Automata;
+			};
+			name = Debug;
+		};
+		01CBB1392BA68E1500BB7BB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.ramekin.AutomataUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Automata;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		01CBB1072BA68E1400BB7BB6 /* Build configuration list for PBXProject "Automata" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				01CBB12F2BA68E1500BB7BB6 /* Debug */,
+				01CBB1302BA68E1500BB7BB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		01CBB1312BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "Automata" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				01CBB1322BA68E1500BB7BB6 /* Debug */,
+				01CBB1332BA68E1500BB7BB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		01CBB1342BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "AutomataTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				01CBB1352BA68E1500BB7BB6 /* Debug */,
+				01CBB1362BA68E1500BB7BB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		01CBB1372BA68E1500BB7BB6 /* Build configuration list for PBXNativeTarget "AutomataUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				01CBB1382BA68E1500BB7BB6 /* Debug */,
+				01CBB1392BA68E1500BB7BB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 01CBB1042BA68E1400BB7BB6 /* Project object */;
+}
