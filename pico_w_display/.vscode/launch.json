@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "preLaunchTask": "rust: cargo build",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "Automata",
+            "cwd": "${workspaceFolder}",
+            "chip": "RP2040",
+            "connectUnderReset": false,
+            "speed": 4000,
+            "runtimeExecutable": "probe-rs",
+            "runtimeArgs": [
+                "dap-server"
+            ],
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "haltAfterReset": false
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "rttEnabled": true,
+                    "programBinary": "./target/thumbv6m-none-eabi/debug/${workspaceFolderBasename}",
+                }
+            ],
+            "consoleLogLevel": "Debug",
+            "wireProtocol": "Swd"
+        }
+    ]
+}
