@@ -50,6 +50,8 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
 
     fn index(&self, x: usize, y: usize) -> usize {
         let height: usize = SIZE / WIDTH;
+        // Check if the x and y coordinates are within bounds
+        // The bounds check depends on the orientation of the grid
         match self.orientation {
             GridOrigin::BottomLeft | GridOrigin::TopRight => {
                 if (x >= WIDTH) || (y >= height) {
@@ -65,6 +67,7 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
                 }
             }
         };
+        // Calculate the index based on the orientation
         match self.orientation {
             GridOrigin::BottomLeft => y * WIDTH + x,
             GridOrigin::TopLeft => x * WIDTH + (WIDTH - 1 - y),

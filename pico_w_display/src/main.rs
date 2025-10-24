@@ -20,14 +20,13 @@ mod grid;
 async fn main(_spawner: Spawner) {
     info!("Start");
     let p = embassy_rp::init(Default::default());
-
     let mut grd =
-        grid::Grid::<17, 289>::new(p.PIO0, p.DMA_CH0, p.PIN_14, grid::GridOrigin::TopRight);
+        grid::Grid::<17, 289>::new(p.PIO0, p.DMA_CH0, p.PIN_15, grid::GridOrigin::TopRight);
 
     // Loop forever making RGB values and pushing them out to the WS2812.
     let mut ticker = Ticker::every(Duration::from_millis(100));
 
-    grd.set_background(colors::YELLOW);
+    grd.set_background(colors::BLACK);
     grd.clear();
     grd.set_foreground(colors::DARK_BLUE);
     grd.blit_glyph(0, 0, fonts::get_glyph('2'));
