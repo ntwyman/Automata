@@ -8,7 +8,10 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-
+use embassy_rp::bind_interrupts;
+use embassy_rp::peripherals::PIO0;
+use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_time::{Duration, Ticker};
 use smart_leds::colors;
 use {defmt_rtt as _, panic_probe as _};
@@ -16,12 +19,22 @@ use {defmt_rtt as _, panic_probe as _};
 mod fonts;
 mod grid;
 
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+});
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     info!("Start");
     let p = embassy_rp::init(Default::default());
-    let mut grd =
-        grid::Grid::<17, 289>::new(p.PIO0, p.DMA_CH0, p.PIN_15, grid::GridOrigin::TopRight);
+
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(p.PIO0, Irqs);
+    let program = PioWs2812Program::new(&mut common);
+    let ws2812 = PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_15, &program);
+
+    let mut grd = grid::Grid::<17, 289>::new(ws2812, grid::GridOrigin::TopRight);
 
     // Loop forever making RGB values and pushing them out to the WS2812.
     let mut ticker = Ticker::every(Duration::from_millis(100));

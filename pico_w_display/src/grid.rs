@@ -1,13 +1,7 @@
 use crate::fonts;
-use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::{DMA_CH0, PIO0};
-use embassy_rp::pio::{InterruptHandler, Pio, PioPin};
-use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
+use embassy_rp::peripherals::PIO0;
+use embassy_rp::pio_programs::ws2812::PioWs2812;
 use smart_leds::RGB8;
-
-bind_interrupts!(struct Irqs {
-    PIO0_IRQ_0 => InterruptHandler<PIO0>;
-});
 
 #[allow(dead_code)] // We only use one of these right now
 pub enum GridOrigin {
@@ -23,27 +17,22 @@ struct Rect {
     width: usize,
     height: usize,
 }
+#[repr(align(4))]
 pub struct Grid<'a, const WIDTH: usize, const SIZE: usize> {
+    data: [RGB8; SIZE],
     orientation: GridOrigin,
     foreground: RGB8,
     background: RGB8,
     pio: PioWs2812<'a, PIO0, 0, SIZE>,
-    data: [RGB8; SIZE],
 }
 
 impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
-    pub fn new(pio: PIO0, dma: DMA_CH0, pin: impl PioPin, orientation: GridOrigin) -> Self {
-        let Pio {
-            mut common, sm0, ..
-        } = Pio::new(pio, Irqs);
-
-        let program = PioWs2812Program::new(&mut common);
-
+    pub fn new(pio: PioWs2812<'d, PIO0, 0, SIZE>, orientation: GridOrigin) -> Self {
         Self {
             orientation,
             foreground: RGB8::new(255, 255, 255),
             background: RGB8::new(0, 0, 0),
-            pio: PioWs2812::new(&mut common, sm0, dma, pin, &program),
+            pio,
             data: [RGB8::default(); SIZE],
         }
     }

@@ -1,11 +1,10 @@
-use core::char;
-
 pub trait Glyph {
     fn width(&self) -> u8;
     fn height(&self) -> u8;
     fn col(&self, col: u8) -> u32;
 }
 
+#[repr(align(4))]
 struct Glyph6by3 {
     data: [u8; 3],
 }
@@ -38,7 +37,7 @@ const GLYPH_3: Glyph6by3 = Glyph6by3 {
     data: [0b00100010, 0b00101001, 0b00110110],
 };
 const GLYPH_4: Glyph6by3 = Glyph6by3 {
-    data: [0b00111100, 0b000001000, 0b00111111],
+    data: [0b00111100, 0b00001000, 0b00111111],
 };
 const GLYPH_5: Glyph6by3 = Glyph6by3 {
     data: [0b00111111, 0b00001001, 0b00000110],
@@ -61,12 +60,12 @@ pub fn get_glyph(chr: char) -> impl Glyph {
         '1' => &GLYPH_1,
         '2' => &GLYPH_2,
         '3' => &GLYPH_3,
-        '4' => &GLYPH_4, // Placeholder for '4', replace with actual glyph
-        '5' => &GLYPH_5, // Placeholder for '5', replace with actual glyph
-        '6' => &GLYPH_6, // Placeholder for '6', replace with actual glyph
-        '7' => &GLYPH_7, // Placeholder for '7', replace with actual glyph
-        '8' => &GLYPH_8, // Placeholder for '8', replace with actual glyph
-        '9' => &GLYPH_9, // Placeholder for '9', replace with actual glyph
+        '4' => &GLYPH_4,
+        '5' => &GLYPH_5,
+        '6' => &GLYPH_6,
+        '7' => &GLYPH_7,
+        '8' => &GLYPH_8,
+        '9' => &GLYPH_9,
         _ => panic!("Glyph not found"),
     }
 }
