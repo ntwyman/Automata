@@ -1,6 +1,6 @@
 use crate::fonts;
 use embassy_rp::peripherals::PIO0;
-use embassy_rp::pio_programs::ws2812::PioWs2812;
+use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812};
 use smart_leds::RGB8;
 
 #[allow(dead_code)] // We only use one of these right now
@@ -23,11 +23,11 @@ pub struct Grid<'a, const WIDTH: usize, const SIZE: usize> {
     orientation: GridOrigin,
     foreground: RGB8,
     background: RGB8,
-    pio: PioWs2812<'a, PIO0, 0, SIZE>,
+    pio: PioWs2812<'a, PIO0, 0, SIZE, Grb>,
 }
 
 impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
-    pub fn new(pio: PioWs2812<'d, PIO0, 0, SIZE>, orientation: GridOrigin) -> Self {
+    pub fn new(pio: PioWs2812<'d, PIO0, 0, SIZE, Grb>, orientation: GridOrigin) -> Self {
         Self {
             orientation,
             foreground: RGB8::new(255, 255, 255),
@@ -69,13 +69,13 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
         self.data[self.index(x, y)] = color;
     }
 
-    pub fn on(&mut self, x: usize, y: usize) {
-        self.set(x, y, self.foreground);
-    }
+    // pub fn on(&mut self, x: usize, y: usize) {
+    //     self.set(x, y, self.foreground);
+    // }
 
-    pub fn off(&mut self, x: usize, y: usize) {
-        self.set(x, y, self.background);
-    }
+    // pub fn off(&mut self, x: usize, y: usize) {
+    //     self.set(x, y, self.background);
+    // }
 
     pub fn clear(&mut self) {
         for i in 0..SIZE {

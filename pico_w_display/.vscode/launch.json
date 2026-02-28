@@ -7,7 +7,7 @@
             "request": "launch",
             "name": "Automata",
             "cwd": "${workspaceFolder}",
-            "chip": "RP2040",
+            "chip": "RP2350",
             "connectUnderReset": false,
             "speed": 4000,
             "runtimeExecutable": "probe-rs",
@@ -22,7 +22,7 @@
                 {
                     "coreIndex": 0,
                     "rttEnabled": true,
-                    "programBinary": "./target/thumbv6m-none-eabi/debug/${workspaceFolderBasename}",
+                    "programBinary": "./target/thumbv8m.main-none-eabihf/debug/${workspaceFolderBasename}",
                 }
             ],
             "consoleLogLevel": "Debug",
