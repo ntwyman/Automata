@@ -35,6 +35,7 @@ const COLON_X: usize = 8;
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     info!("Start");
+
     let p = embassy_rp::init(Default::default());
 
     let Pio {

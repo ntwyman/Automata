@@ -7,16 +7,15 @@
             "request": "launch",
             "name": "Automata",
             "cwd": "${workspaceFolder}",
-            "chip": "RP2350",
+            "chip": "RP235x",
             "connectUnderReset": false,
-            "speed": 4000,
             "runtimeExecutable": "probe-rs",
             "runtimeArgs": [
                 "dap-server"
             ],
             "flashingConfig": {
                 "flashingEnabled": true,
-                "haltAfterReset": false
+                "haltAfterReset": true
             },
             "coreConfigs": [
                 {
