@@ -23,6 +23,9 @@ pub struct Grid<'a, const WIDTH: usize, const SIZE: usize> {
     orientation: GridOrigin,
     foreground: RGB8,
     background: RGB8,
+    /// Overall brightness scale, 0-255. Applied on top of `data` at `update()`
+    /// time so `data` itself always holds true, unscaled colors.
+    brightness: u8,
     pio: PioWs2812<'a, PIO0, 0, SIZE, Grb>,
 }
 
@@ -32,6 +35,7 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
             orientation,
             foreground: RGB8::new(255, 255, 255),
             background: RGB8::new(0, 0, 0),
+            brightness: 255,
             pio,
             data: [RGB8::default(); SIZE],
         }
@@ -91,7 +95,18 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
         }
     }
     pub async fn update(&mut self) {
-        self.pio.write(&self.data).await;
+        if self.brightness == 255 {
+            self.pio.write(&self.data).await;
+        } else {
+            let mut scaled = [RGB8::default(); SIZE];
+            for (dst, src) in scaled.iter_mut().zip(smart_leds::brightness(
+                self.data.iter().copied(),
+                self.brightness,
+            )) {
+                *dst = src;
+            }
+            self.pio.write(&scaled).await;
+        }
     }
 
     pub fn set_foreground(&mut self, color: RGB8) {
@@ -99,6 +114,9 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
     }
     pub fn set_background(&mut self, color: RGB8) {
         self.background = color;
+    }
+    pub fn set_brightness(&mut self, brightness: u8) {
+        self.brightness = brightness;
     }
 
     pub fn blit_glyph(&mut self, x: usize, y: usize, glyph: impl fonts::Glyph) {

@@ -1,0 +1,12 @@
+[default.general]
+chip = "RP235x"
+
+[default.rtt]
+enabled = true
+
+[[default.rtt.up_channels]]
+channel = 0
+format = "Defmt"
+
+[default.gdb]
+enabled = false

@@ -79,18 +79,21 @@ pub fn get_colon_glyph() -> impl Glyph {
     &GLYPH_COLON
 }
 
-pub fn get_digit_glyph(digit: u8) -> impl Glyph {
+/// Returns the glyph for `digit`, or `None` if it isn't `0..=9`. Callers that
+/// receive digits from an untrusted source (e.g. the serial protocol) must not
+/// be able to crash the firmware with a bad value, so this never panics.
+pub fn get_digit_glyph(digit: u8) -> Option<impl Glyph> {
     match digit {
-        0 => &GLYPH_0,
-        1 => &GLYPH_1,
-        2 => &GLYPH_2,
-        3 => &GLYPH_3,
-        4 => &GLYPH_4,
-        5 => &GLYPH_5,
-        6 => &GLYPH_6,
-        7 => &GLYPH_7,
-        8 => &GLYPH_8,
-        9 => &GLYPH_9,
-        _ => panic!("Digit out of range"),
+        0 => Some(&GLYPH_0),
+        1 => Some(&GLYPH_1),
+        2 => Some(&GLYPH_2),
+        3 => Some(&GLYPH_3),
+        4 => Some(&GLYPH_4),
+        5 => Some(&GLYPH_5),
+        6 => Some(&GLYPH_6),
+        7 => Some(&GLYPH_7),
+        8 => Some(&GLYPH_8),
+        9 => Some(&GLYPH_9),
+        _ => None,
     }
 }
