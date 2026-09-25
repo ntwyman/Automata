@@ -22,10 +22,12 @@ use embedded_io_async::{Read, Write};
 use heapless::String;
 use smart_leds::RGB8;
 
-/// Longest line we'll accept; comfortably longer than any real command
-/// (the longest is `BRIGHTNESS 255`). Anything longer is rejected as
-/// `ERR line too long` rather than silently truncated.
-const MAX_LINE_LEN: usize = 32;
+use crate::wifi::Wifi;
+
+/// Longest line we'll accept; comfortably longer than any real command (the
+/// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
+/// rejected as `ERR line too long` rather than silently truncated.
+const MAX_LINE_LEN: usize = 104;
 
 /// A single-slot mailbox from the protocol session to the display loop.
 pub type CommandChannel = Channel<CriticalSectionRawMutex, Command, 1>;
@@ -45,6 +47,14 @@ pub enum Command {
     Color(RGB8),
     /// Set overall LED brightness (0-255).
     Brightness(u8),
+}
+
+/// A parsed line: either a [`Command`] destined for the display loop, or a
+/// `WIFI` request handled directly in [`run_session`] since it has nothing
+/// to do with the grid.
+enum ParsedLine {
+    Display(Command),
+    Wifi(String<32>, String<63>),
 }
 
 #[derive(defmt::Format)]
@@ -67,20 +77,22 @@ impl ProtocolError {
 /// Parses one command line. Never panics on malformed input — anything that
 /// doesn't match a known command shape is a plain `Err`, not a crash. This
 /// matters more once the same parser is reachable over the network.
-fn parse_line(line: &str) -> Result<Command, ProtocolError> {
+fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
     let line = line.trim();
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
     if cmd.eq_ignore_ascii_case("TEXT") {
-        parse_text(rest)
+        parse_text(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("CLOCK") {
-        Ok(Command::Clock)
+        Ok(ParsedLine::Display(Command::Clock))
     } else if cmd.eq_ignore_ascii_case("COLOR") {
-        parse_color(rest)
+        parse_color(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("BRIGHTNESS") {
-        parse_brightness(rest)
+        parse_brightness(rest).map(ParsedLine::Display)
+    } else if cmd.eq_ignore_ascii_case("WIFI") {
+        parse_wifi(rest)
     } else {
         Err(ProtocolError::UnknownCommand)
     }
@@ -125,6 +137,27 @@ fn parse_brightness(s: &str) -> Result<Command, ProtocolError> {
     let n: u16 = s.parse().map_err(|_| ProtocolError::BadArgs)?;
     let n = u8::try_from(n).map_err(|_| ProtocolError::BadArgs)?;
     Ok(Command::Brightness(n))
+}
+
+/// `<ssid> <password>`. The SSID can't contain spaces, but the password is
+/// everything after that first space so it may (WPA2/3 passphrases allow
+/// them). Bounds match the real 802.11 limits: a 32-byte SSID and a
+/// 63-character passphrase.
+fn parse_wifi(s: &str) -> Result<ParsedLine, ProtocolError> {
+    let mut parts = s.splitn(2, ' ');
+    let ssid = parts.next().unwrap_or("");
+    let password = parts.next().unwrap_or("").trim();
+    if ssid.is_empty() || password.is_empty() {
+        return Err(ProtocolError::BadArgs);
+    }
+
+    let mut ssid_buf: String<32> = String::new();
+    ssid_buf.push_str(ssid).map_err(|_| ProtocolError::BadArgs)?;
+    let mut password_buf: String<63> = String::new();
+    password_buf
+        .push_str(password)
+        .map_err(|_| ProtocolError::BadArgs)?;
+    Ok(ParsedLine::Wifi(ssid_buf, password_buf))
 }
 
 /// Outcome of reading one line from the transport.
@@ -176,6 +209,7 @@ pub async fn run_session<R: Read, W: Write>(
     mut writer: W,
     commands: &CommandChannel,
     acks: &AckChannel,
+    wifi: &mut Wifi,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -194,12 +228,28 @@ pub async fn run_session<R: Read, W: Write>(
                 let _ = reply.push_str("ERR line too long\n");
             }
             Line::Ready => {
-                info!("recv: {}", line.as_str());
+                // Logged before parsing so malformed lines are still visible
+                // — except WIFI, whose password must never hit the RTT log.
+                if line.as_str().len() >= 4 && line.as_str()[..4].eq_ignore_ascii_case("wifi") {
+                    info!("recv: WIFI <redacted>");
+                } else {
+                    info!("recv: {}", line.as_str());
+                }
                 match parse_line(&line) {
-                    Ok(command) => {
+                    Ok(ParsedLine::Display(command)) => {
                         commands.send(command).await;
                         acks.receive().await;
                         let _ = reply.push_str("OK\n");
+                    }
+                    Ok(ParsedLine::Wifi(ssid, password)) => {
+                        match wifi.join(&ssid, password.as_bytes()).await {
+                            Ok(ip) => {
+                                let _ = writeln!(reply, "OK {}", ip);
+                            }
+                            Err(reason) => {
+                                let _ = writeln!(reply, "ERR {}", reason);
+                            }
+                        }
                     }
                     Err(e) => {
                         let _ = writeln!(reply, "ERR {}", e.reason());

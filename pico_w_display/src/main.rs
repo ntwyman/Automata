@@ -12,7 +12,7 @@ use embassy_futures::join::join3;
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
-use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
@@ -25,10 +25,12 @@ mod fonts;
 mod grid;
 mod protocol;
 mod usb;
+mod wifi;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>;
+    PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
 
@@ -88,7 +90,7 @@ fn text_digits(s: &str) -> [u8; 4] {
 }
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     info!("Start");
 
     let p = embassy_rp::init(Default::default());
@@ -103,6 +105,11 @@ async fn main(_spawner: Spawner) {
 
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
+
+    let mut wifi = wifi::init(
+        spawner, p.PIO1, p.DMA_CH1, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
+    )
+    .await;
 
     // USB CDC-ACM serial port. All these buffers are plain locals, borrowed
     // for the rest of `main` rather than declared `'static` — nothing here is
@@ -122,7 +129,7 @@ async fn main(_spawner: Spawner) {
         loop {
             receiver.wait_connection().await;
             info!("serial client connected");
-            protocol::run_session(&mut receiver, &mut sender, &commands, &acks).await;
+            protocol::run_session(&mut receiver, &mut sender, &commands, &acks, &mut wifi).await;
             info!("serial client disconnected");
         }
     };

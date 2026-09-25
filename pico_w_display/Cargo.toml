@@ -47,6 +47,15 @@ embassy-usb = { version = "0.6.0", features = ["defmt"] }
 embassy-futures = "0.1.2"
 heapless = { version = "0.9.3", features = ["defmt"] }
 
+cyw43 = { version = "0.7.0", features = ["defmt"] }
+cyw43-pio = { version = "0.10.0", features = ["defmt"] }
+embassy-net = { version = "0.9.1", features = [
+    "defmt",
+    "dhcpv4",
+    "medium-ethernet",
+] }
+static_cell = "2.1.1"
+
 [profile.release]
 debug = 2
 lto = true
