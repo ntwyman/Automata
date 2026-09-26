@@ -18,12 +18,12 @@ use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use embassy_time::{Duration, Instant, Ticker};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
+use pico_w_display::protocol;
 use smart_leds::colors;
 use {defmt_rtt as _, panic_probe as _};
 
 mod fonts;
 mod grid;
-mod protocol;
 mod usb;
 mod wifi;
 

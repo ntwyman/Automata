@@ -21,6 +21,7 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH1, PIN_23, PIN_24, PIN_25, PIN_29, PIO1};
 use embassy_rp::pio::Pio;
 use embassy_time::{Duration, with_timeout};
+use pico_w_display::protocol::WifiJoin;
 use static_cell::StaticCell;
 
 use crate::Irqs;
@@ -46,11 +47,13 @@ pub struct Wifi {
     stack: Stack<'static>,
 }
 
-impl Wifi {
+impl WifiJoin for Wifi {
+    type Address = Ipv4Address;
+
     /// Joins `ssid` using `password` (a WPA2/WPA3 passphrase) and waits for
     /// a DHCP lease. Returns the assigned address, or a reason string that's
     /// safe to send straight back to a client as `ERR <reason>`.
-    pub async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Ipv4Address, &'static str> {
+    async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Ipv4Address, &'static str> {
         let outcome = with_timeout(JOIN_TIMEOUT, async {
             self.control
                 .join(ssid, JoinOptions::new(password))
@@ -119,7 +122,12 @@ pub async fn init(
     let seed = rng.next_u64();
 
     static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
-    let (stack, runner) = embassy_net::new(net_device, config, RESOURCES.init(StackResources::new()), seed);
+    let (stack, runner) = embassy_net::new(
+        net_device,
+        config,
+        RESOURCES.init(StackResources::new()),
+        seed,
+    );
     spawner.spawn(unwrap!(net_task(runner)));
 
     Wifi { control, stack }

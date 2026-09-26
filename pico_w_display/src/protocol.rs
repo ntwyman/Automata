@@ -15,14 +15,46 @@
 
 use core::fmt::Write as _;
 
-use defmt::{info, warn};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embedded_io_async::{Read, Write};
 use heapless::String;
 use smart_leds::RGB8;
 
-use crate::wifi::Wifi;
+// Host tests can't link defmt's global logger (that's `defmt-rtt`, an
+// on-device crate), so these become no-ops under `cfg(test)`. On-device
+// behavior is unchanged: `info!`/`warn!` still resolve to `defmt::info!`/
+// `defmt::warn!` there.
+#[cfg(not(test))]
+use defmt::{info, warn};
+#[cfg(test)]
+macro_rules! info {
+    ($($arg:tt)*) => {};
+}
+#[cfg(test)]
+macro_rules! warn {
+    ($($arg:tt)*) => {};
+}
+
+/// What a transport needs to provide so [`run_session`] can dispatch `WIFI`
+/// without depending on any concrete Wi-Fi stack. Kept separate from
+/// [`Command`]/[`CommandChannel`] because joining a network is a direct,
+/// awaited round-trip — there's no display to ack it.
+// Only implemented in this workspace (by `wifi::Wifi` and this module's own
+// test fake), so the usual reason for the `async_fn_in_trait` lint — an
+// external implementor needing `Send` bounds it can't add later — doesn't
+// apply.
+#[allow(async_fn_in_trait)]
+pub trait WifiJoin {
+    /// The joined network's address, formatted straight into the `OK <addr>`
+    /// reply — hence the `Display` bound.
+    type Address: core::fmt::Display;
+
+    /// Joins `ssid` using `password`, returning the assigned address, or a
+    /// reason string that's safe to send straight back to a client as
+    /// `ERR <reason>`.
+    async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Self::Address, &'static str>;
+}
 
 /// Longest line we'll accept; comfortably longer than any real command (the
 /// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
@@ -152,7 +184,9 @@ fn parse_wifi(s: &str) -> Result<ParsedLine, ProtocolError> {
     }
 
     let mut ssid_buf: String<32> = String::new();
-    ssid_buf.push_str(ssid).map_err(|_| ProtocolError::BadArgs)?;
+    ssid_buf
+        .push_str(ssid)
+        .map_err(|_| ProtocolError::BadArgs)?;
     let mut password_buf: String<63> = String::new();
     password_buf
         .push_str(password)
@@ -204,12 +238,12 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// the display applied it, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write>(
+pub async fn run_session<R: Read, W: Write, J: WifiJoin>(
     mut reader: R,
     mut writer: W,
     commands: &CommandChannel,
     acks: &AckChannel,
-    wifi: &mut Wifi,
+    wifi: &mut J,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -262,5 +296,202 @@ pub async fn run_session<R: Read, W: Write>(
             warn!("serial write failed, ending session");
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::convert::Infallible;
+
+    use embassy_futures::select::select;
+
+    use super::*;
+
+    /// Feeds fixed bytes one at a time, then reports a clean close (`Ok(0)`)
+    /// once exhausted — exactly how `read_line` sees a transport disconnect,
+    /// which is what ends [`run_session`]'s loop in every test here.
+    struct FakeReader {
+        bytes: std::vec::Vec<u8>,
+        pos: usize,
+    }
+
+    impl embedded_io_async::ErrorType for FakeReader {
+        type Error = Infallible;
+    }
+
+    impl Read for FakeReader {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Infallible> {
+            if self.pos >= self.bytes.len() {
+                return Ok(0);
+            }
+            buf[0] = self.bytes[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+
+    /// Collects everything written to it into a caller-owned buffer, so the
+    /// buffer is still readable once `run_session` (which takes the writer
+    /// by value) has returned.
+    struct FakeWriter<'a> {
+        written: &'a mut std::vec::Vec<u8>,
+    }
+
+    impl embedded_io_async::ErrorType for FakeWriter<'_> {
+        type Error = Infallible;
+    }
+
+    impl Write for FakeWriter<'_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Infallible> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Infallible> {
+            Ok(())
+        }
+    }
+
+    /// A [`WifiJoin`] that returns a canned outcome, ignoring the credentials
+    /// it's given — the parsing/threading of `ssid`/`password` is exercised
+    /// separately, this is only about `run_session`'s handling of the reply.
+    struct FakeWifi {
+        outcome: Result<&'static str, &'static str>,
+    }
+
+    impl WifiJoin for FakeWifi {
+        type Address = &'static str;
+
+        async fn join(
+            &mut self,
+            _ssid: &str,
+            _password: &[u8],
+        ) -> Result<&'static str, &'static str> {
+            self.outcome
+        }
+    }
+
+    /// Feeds `input` through [`run_session`] and returns everything it wrote
+    /// back. A fake display task drains `commands` and immediately acks,
+    /// standing in for `main.rs`'s real display loop; `select` (rather than
+    /// `join`) is used since that fake loop never terminates on its own —
+    /// only `run_session` reaching a clean close ends the pair.
+    fn run(input: &str, wifi_outcome: Result<&'static str, &'static str>) -> std::string::String {
+        let reader = FakeReader {
+            bytes: input.as_bytes().to_vec(),
+            pos: 0,
+        };
+        let mut written = std::vec::Vec::new();
+        let writer = FakeWriter {
+            written: &mut written,
+        };
+        let commands = CommandChannel::new();
+        let acks = AckChannel::new();
+        let mut wifi = FakeWifi {
+            outcome: wifi_outcome,
+        };
+
+        let session = run_session(reader, writer, &commands, &acks, &mut wifi);
+        let fake_display = async {
+            loop {
+                commands.receive().await;
+                acks.send(()).await;
+            }
+        };
+
+        pollster::block_on(select(session, fake_display));
+        std::string::String::from_utf8(written).expect("reply is always ASCII")
+    }
+
+    fn ok_wifi() -> Result<&'static str, &'static str> {
+        Ok("10.0.0.5")
+    }
+
+    #[test]
+    fn text_valid() {
+        assert_eq!(run("TEXT 12:34\n", ok_wifi()), "OK\n");
+    }
+
+    #[test]
+    fn text_malformed_wrong_length() {
+        assert_eq!(run("TEXT 1234\n", ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn text_malformed_bad_char() {
+        assert_eq!(run("TEXT ab:34\n", ok_wifi()), "ERR unsupported char\n");
+    }
+
+    #[test]
+    fn clock_valid() {
+        assert_eq!(run("CLOCK\n", ok_wifi()), "OK\n");
+    }
+
+    #[test]
+    fn color_valid() {
+        assert_eq!(run("COLOR ff00aa\n", ok_wifi()), "OK\n");
+    }
+
+    #[test]
+    fn color_malformed_not_hex() {
+        assert_eq!(run("COLOR zzzzzz\n", ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn brightness_valid() {
+        assert_eq!(run("BRIGHTNESS 200\n", ok_wifi()), "OK\n");
+    }
+
+    #[test]
+    fn brightness_malformed_out_of_range() {
+        assert_eq!(run("BRIGHTNESS 999\n", ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn wifi_valid_join_succeeds() {
+        assert_eq!(
+            run("WIFI myssid mypassword\n", Ok("10.0.0.5")),
+            "OK 10.0.0.5\n"
+        );
+    }
+
+    #[test]
+    fn wifi_join_fails() {
+        assert_eq!(
+            run("WIFI myssid mypassword\n", Err("wifi join failed")),
+            "ERR wifi join failed\n"
+        );
+    }
+
+    #[test]
+    fn wifi_malformed_missing_password() {
+        assert_eq!(run("WIFI myssid\n", ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn wifi_malformed_ssid_too_long() {
+        // 33 bytes: one over the 32-byte SSID bound `parse_wifi` documents.
+        let ssid = "a".repeat(33);
+        let line = std::format!("WIFI {ssid} mypassword\n");
+        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn wifi_malformed_password_too_long() {
+        // 64 bytes: one over the 63-byte password bound `parse_wifi` documents.
+        let password = "a".repeat(64);
+        let line = std::format!("WIFI myssid {password}\n");
+        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn unknown_command() {
+        assert_eq!(run("BOGUS\n", ok_wifi()), "ERR unknown command\n");
+    }
+
+    #[test]
+    fn line_too_long() {
+        let long_line = "TEXT ".to_string() + &"9".repeat(200) + "\n";
+        assert_eq!(run(&long_line, ok_wifi()), "ERR line too long\n");
     }
 }
