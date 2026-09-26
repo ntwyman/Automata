@@ -1,7 +1,7 @@
 use crate::fonts;
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812};
-use smart_leds::RGB8;
+use smart_leds::{RGB8, SmartLedsWriteAsync};
 
 #[allow(dead_code)] // We only use one of these right now
 pub enum GridOrigin {
@@ -26,11 +26,11 @@ pub struct Grid<'a, const WIDTH: usize, const SIZE: usize> {
     /// Overall brightness scale, 0-255. Applied on top of `data` at `update()`
     /// time so `data` itself always holds true, unscaled colors.
     brightness: u8,
-    pio: PioWs2812<'a, PIO0, 0, SIZE, Grb>,
+    pio: PioWs2812<'a, PIO0, 0, Grb>,
 }
 
 impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
-    pub fn new(pio: PioWs2812<'d, PIO0, 0, SIZE, Grb>, orientation: GridOrigin) -> Self {
+    pub fn new(pio: PioWs2812<'d, PIO0, 0, Grb>, orientation: GridOrigin) -> Self {
         Self {
             orientation,
             foreground: RGB8::new(255, 255, 255),
@@ -96,7 +96,7 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
     }
     pub async fn update(&mut self) {
         if self.brightness == 255 {
-            self.pio.write(&self.data).await;
+            self.pio.write(self.data.iter().copied()).await;
         } else {
             let mut scaled = [RGB8::default(); SIZE];
             for (dst, src) in scaled.iter_mut().zip(smart_leds::brightness(
@@ -105,7 +105,7 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
             )) {
                 *dst = src;
             }
-            self.pio.write(&scaled).await;
+            self.pio.write(scaled.iter().copied()).await;
         }
     }
 

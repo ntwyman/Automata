@@ -59,7 +59,16 @@ pub trait WifiJoin {
 /// Longest line we'll accept; comfortably longer than any real command (the
 /// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
 /// rejected as `ERR line too long` rather than silently truncated.
-const MAX_LINE_LEN: usize = 104;
+///
+/// `pub` (rather than internal-only) so the on-device `[[bin]]` crate's BLE
+/// `command` characteristic (`bt.rs`, a separate crate from this `[lib]`)
+/// can size its backing buffer off the same bound instead of duplicating it.
+pub const MAX_LINE_LEN: usize = 104;
+
+/// Longest reply line `run_session` ever writes (`OK <ipv4 addr>\n` is the
+/// longest case). `pub` for the same reason as [`MAX_LINE_LEN`]: the BLE
+/// `reply` characteristic sizes its backing buffer off this bound.
+pub const MAX_REPLY_LEN: usize = 40;
 
 /// A single-slot mailbox from the protocol session to the display loop.
 pub type CommandChannel = Channel<CriticalSectionRawMutex, Command, 1>;
@@ -256,7 +265,7 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin>(
             }
         };
 
-        let mut reply: String<40> = String::new();
+        let mut reply: String<MAX_REPLY_LEN> = String::new();
         match outcome {
             Line::TooLong => {
                 let _ = reply.push_str("ERR line too long\n");

@@ -8,20 +8,24 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, PIO1, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
 use pico_w_display::protocol;
 use smart_leds::colors;
+use trouble_host::prelude::ExternalController;
 use {defmt_rtt as _, panic_probe as _};
 
+mod bt;
 mod fonts;
 mod grid;
 mod usb;
@@ -30,7 +34,7 @@ mod wifi;
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
 
@@ -106,10 +110,14 @@ async fn main(spawner: Spawner) {
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
 
-    let mut wifi = wifi::init(
-        spawner, p.PIO1, p.DMA_CH1, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
+    let (wifi_dev, bt_device) = wifi::init(
+        spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
     )
     .await;
+    // Shared rather than owned outright: the USB and BLE sessions below run
+    // concurrently and each needs its own `WifiJoin` handle (see
+    // `wifi::SharedWifi`), so a plain `&mut Wifi` can't work for both.
+    let wifi_mutex: Mutex<CriticalSectionRawMutex, wifi::Wifi> = Mutex::new(wifi_dev);
 
     // USB CDC-ACM serial port. All these buffers are plain locals, borrowed
     // for the rest of `main` rather than declared `'static` — nothing here is
@@ -126,6 +134,7 @@ async fn main(spawner: Spawner) {
     let usb_fut = usb_dev.run();
 
     let protocol_fut = async {
+        let mut wifi = wifi::SharedWifi(&wifi_mutex);
         loop {
             receiver.wait_connection().await;
             info!("serial client connected");
@@ -133,6 +142,14 @@ async fn main(spawner: Spawner) {
             info!("serial client disconnected");
         }
     };
+
+    let ble_controller: bt::BtController = ExternalController::new(bt_device);
+    let ble_fut = bt::run(
+        ble_controller,
+        &commands,
+        &acks,
+        wifi::SharedWifi(&wifi_mutex),
+    );
 
     let display_fut = async {
         let start = Instant::now();
@@ -187,5 +204,5 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    join3(usb_fut, protocol_fut, display_fut).await;
+    join4(usb_fut, protocol_fut, ble_fut, display_fut).await;
 }

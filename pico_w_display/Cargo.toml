@@ -68,7 +68,7 @@ embassy-rp = { version = "0.10.0", features = [
 ] }
 embassy-usb = { version = "0.6.0", features = ["defmt"] }
 
-cyw43 = { version = "0.7.0", features = ["defmt"] }
+cyw43 = { version = "0.7.0", features = ["defmt", "bluetooth"] }
 cyw43-pio = { version = "0.10.0", features = ["defmt"] }
 embassy-net = { version = "0.9.1", features = [
     "defmt",
@@ -76,6 +76,22 @@ embassy-net = { version = "0.9.1", features = [
     "medium-ethernet",
 ] }
 static_cell = "2.1.1"
+
+# BLE GATT transport. `default-packet-pool-mtu-128` matches the proven
+# `rp-pico-2-w` reference config (rather than the 251-byte default) — plenty
+# for `protocol::MAX_LINE_LEN`, and lighter on this MCU's RAM/DMA buffers.
+# `security` is needed for the encrypted `command`/`reply` characteristics;
+# bond persistence to flash is a follow-up ticket, so bonds are in-memory
+# only for now (lost on power cycle).
+trouble-host = { version = "0.8", default-features = false, features = [
+    "derive",
+    "gatt",
+    "peripheral",
+    "default-packet-pool",
+    "default-packet-pool-mtu-128",
+    "security",
+    "defmt",
+] }
 
 [dev-dependencies]
 # Host-only: `CriticalSectionRawMutex` needs a registered critical-section
@@ -104,3 +120,28 @@ opt-level = "z"
 inherits = "dev"
 lto = false
 opt-level = 0
+
+# `cyw43`'s `bluetooth` feature (`new_with_bluetooth`) isn't in a released
+# version yet — only on this embassy-rs/embassy commit, which also carries
+# breaking API changes (e.g. `cyw43-pio`'s `PioSpi::new` now takes two DMA
+# channels). Pulls in `cyw43-pio`/`embassy-rp`/`embassy-sync`/
+# `embassy-executor`/`embassy-time` too so the workspace stays on one
+# consistent commit; matches the official `embassy-rs/trouble`
+# `rp-pico-2-w` example. See `docs/adr/0001-git-pinned-cyw43-bluetooth-deps.md`.
+[patch.crates-io]
+cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+# Not in BLE_PLAN.md's original list: the pinned commit's `embassy-sync`
+# changed `zerocopy_channel::Sender`'s API in a way the crates.io releases of
+# `embassy-net-driver-channel` (a transitive `embassy-net` dependency) and
+# `embassy-usb` (whose CDC-NCM class also uses it, unconditionally, even
+# though this crate never enables that class) no longer match. Pinning both
+# to the same commit keeps every consumer of `embassy-sync` internals on one
+# consistent version.
+embassy-net-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-net-driver-channel = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
