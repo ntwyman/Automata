@@ -137,8 +137,14 @@ async fn main(spawner: Spawner) {
     // on `bt::run`'s very first advertisement — even right after this
     // power-on — with no button press. `bond_store` itself is shared
     // (rather than handed to `bt::run` outright) because a fresh pairing
-    // later in this same session also needs to write to it.
+    // later in this same session also needs to write to it, and `UNPAIR`
+    // (over either transport) needs to clear it.
     let bond_store_mutex: Mutex<CriticalSectionRawMutex, bond_store::BondStore> = Mutex::new(bond_store);
+    // Lets `UNPAIR`, dispatched from either transport's `run_session`, tell
+    // `bt::run`'s connection loop to evict its in-memory Bond — see
+    // `bond_store::UnpairSignal`'s doc comment for why that can't happen
+    // directly at the dispatch site.
+    let unpair_signal: bond_store::UnpairSignal = bond_store::UnpairSignal::new();
 
     // GP22 (the board's BOOT/user button): pressing it arms the Bondable
     // Window `bt::run` checks before allowing a new connection to bond (see
@@ -165,10 +171,22 @@ async fn main(spawner: Spawner) {
 
     let protocol_fut = async {
         let mut wifi = wifi::SharedWifi(&wifi_mutex);
+        let mut bonds = bond_store::Bonds {
+            store: &bond_store_mutex,
+            evict: &unpair_signal,
+        };
         loop {
             receiver.wait_connection().await;
             info!("serial client connected");
-            protocol::run_session(&mut receiver, &mut sender, &commands, &acks, &mut wifi).await;
+            protocol::run_session(
+                &mut receiver,
+                &mut sender,
+                &commands,
+                &acks,
+                &mut wifi,
+                &mut bonds,
+            )
+            .await;
             info!("serial client disconnected");
         }
     };
@@ -181,7 +199,10 @@ async fn main(spawner: Spawner) {
         wifi::SharedWifi(&wifi_mutex),
         initial_bond,
         &bondable_window,
-        &bond_store_mutex,
+        bond_store::Bonds {
+            store: &bond_store_mutex,
+            evict: &unpair_signal,
+        },
     );
 
     let display_fut = async {

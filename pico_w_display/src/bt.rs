@@ -26,7 +26,7 @@ use heapless::Vec;
 use pico_w_display::protocol::{self, WifiJoin};
 use trouble_host::prelude::*;
 
-use crate::bond_store::BondStore;
+use crate::bond_store::{Bonds, BondStore};
 use crate::pairing_window::BondableWindow;
 
 /// [`CommandService`]'s UUID (`e3fcb01d-9492-4fa7-97db-63f3491b3f58` — a
@@ -194,7 +194,9 @@ impl Write for BleWriter<'_> {
 /// is registered with the stack immediately, so a previously-bonded phone
 /// can reconnect on the very first advertisement — no button press, even
 /// right after a power cycle. `window` gates whether new connections may
-/// bond at all; `bond_store` is where a fresh in-window Bond gets persisted.
+/// bond at all; `bonds` is where a fresh in-window Bond gets persisted, and
+/// where `UNPAIR` (over either transport) signals this loop to evict its
+/// in-memory copy.
 pub async fn run<J: WifiJoin>(
     controller: BtController,
     commands: &protocol::CommandChannel,
@@ -202,7 +204,7 @@ pub async fn run<J: WifiJoin>(
     mut wifi: J,
     initial_bond: Option<BondInformation>,
     window: &BondableWindow,
-    bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
+    mut bonds: Bonds<'_>,
 ) {
     // Fixed rather than derived from the chip's real BT MAC (no accessor for
     // it is wired up here) — fine for a single-device-per-app product; matches
@@ -241,8 +243,17 @@ pub async fn run<J: WifiJoin>(
 
     join(ble_host_task(runner), async {
         loop {
-            match advertise(&mut peripheral, &server).await {
-                Ok(conn) => {
+            // Racing `bonds.evict.wait()` alongside advertising (rather than
+            // only checking it once connected) means a same-session
+            // `UNPAIR` — over USB while no phone is connected, or over BLE
+            // from the currently-bonded phone itself once its connection
+            // ends — evicts the in-memory Bond without waiting for a power
+            // cycle. Accepted, low-probability gap: if `UNPAIR` lands in the
+            // same poll cycle as an in-flight `accept()` completing, `select`
+            // drops the `advertise` future and that connection attempt is
+            // lost; the phone just retries on the next advertisement.
+            match select(advertise(&mut peripheral, &server), bonds.evict.wait()).await {
+                Either::First(Ok(conn)) => {
                     info!("ble connected");
                     // Must happen before any pairing traffic arrives (see
                     // `set_bondable`'s own doc comment) — right after accept
@@ -256,8 +267,15 @@ pub async fn run<J: WifiJoin>(
                     let command = &server.command_service.command;
                     let reply = &server.command_service.reply;
 
-                    let events_fut =
-                        gatt_events_task(&conn, command, &rx, &disconnected, bond_store, &stack, &known_identity);
+                    let events_fut = gatt_events_task(
+                        &conn,
+                        command,
+                        &rx,
+                        &disconnected,
+                        bonds.store,
+                        &stack,
+                        &known_identity,
+                    );
                     let reader = BleReader {
                         rx: &rx,
                         disconnected: &disconnected,
@@ -265,8 +283,9 @@ pub async fn run<J: WifiJoin>(
                         pos: 0,
                     };
                     let writer = BleWriter { conn: &conn, reply };
-                    let session_fut =
-                        protocol::run_session(reader, writer, commands, acks, &mut wifi);
+                    let session_fut = protocol::run_session(
+                        reader, writer, commands, acks, &mut wifi, &mut bonds,
+                    );
 
                     // `join`, not `select`: `session_fut` must run to its own
                     // completion (see `Disconnected`'s doc comment) rather
@@ -275,9 +294,19 @@ pub async fn run<J: WifiJoin>(
                     join(events_fut, session_fut).await;
                     info!("ble disconnected");
                 }
-                Err(_) => {
+                Either::First(Err(_)) => {
                     warn!("ble advertise error");
                     Timer::after(Duration::from_millis(500)).await;
+                }
+                Either::Second(()) => {
+                    // Flash is already clear by the time this fires (see
+                    // `Bonds::clear`); this just drops `stack`'s in-memory
+                    // copy so the evicted phone can't auto-reconnect for the
+                    // rest of this power cycle either.
+                    if let Some(identity) = known_identity.take() {
+                        let _ = stack.remove_bond_information(identity);
+                        info!("evicted in-memory bond after UNPAIR");
+                    }
                 }
             }
         }

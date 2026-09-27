@@ -56,6 +56,18 @@ pub trait WifiJoin {
     async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Self::Address, &'static str>;
 }
 
+/// What a transport needs to provide so [`run_session`] can dispatch
+/// `UNPAIR` without depending on any concrete Bond-storage or BLE-stack
+/// type. Mirrors [`WifiJoin`]'s shape and the same reasoning: `UNPAIR` is a
+/// direct, awaited round-trip that has nothing to do with the display.
+#[allow(async_fn_in_trait)]
+pub trait BondClear {
+    /// Clears the persisted Bond (and evicts any in-memory counterpart),
+    /// returning a reason string that's safe to send straight back to a
+    /// client as `ERR <reason>` on failure.
+    async fn clear(&mut self) -> Result<(), &'static str>;
+}
+
 /// Longest line we'll accept; comfortably longer than any real command (the
 /// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
 /// rejected as `ERR line too long` rather than silently truncated.
@@ -96,6 +108,9 @@ pub enum Command {
 enum ParsedLine {
     Display(Command),
     Wifi(String<32>, String<63>),
+    /// Clear the persisted Bond, handled directly in [`run_session`] like
+    /// `Wifi` since it has nothing to do with the grid.
+    Unpair,
 }
 
 #[derive(defmt::Format)]
@@ -134,6 +149,8 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         parse_brightness(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("WIFI") {
         parse_wifi(rest)
+    } else if cmd.eq_ignore_ascii_case("UNPAIR") {
+        Ok(ParsedLine::Unpair)
     } else {
         Err(ProtocolError::UnknownCommand)
     }
@@ -247,12 +264,13 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// the display applied it, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiJoin>(
+pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
     mut reader: R,
     mut writer: W,
     commands: &CommandChannel,
     acks: &AckChannel,
     wifi: &mut J,
+    bond: &mut U,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -294,6 +312,14 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin>(
                             }
                         }
                     }
+                    Ok(ParsedLine::Unpair) => match bond.clear().await {
+                        Ok(()) => {
+                            let _ = reply.push_str("OK\n");
+                        }
+                        Err(reason) => {
+                            let _ = writeln!(reply, "ERR {}", reason);
+                        }
+                    },
                     Err(e) => {
                         let _ = writeln!(reply, "ERR {}", e.reason());
                     }
@@ -380,12 +406,29 @@ mod tests {
         }
     }
 
+    /// A [`BondClear`] that returns a canned outcome, standing in for a real
+    /// bond-store/BLE-stack eviction — this is only about `run_session`'s
+    /// handling of the reply.
+    struct FakeBondClear {
+        outcome: Result<(), &'static str>,
+    }
+
+    impl BondClear for FakeBondClear {
+        async fn clear(&mut self) -> Result<(), &'static str> {
+            self.outcome
+        }
+    }
+
     /// Feeds `input` through [`run_session`] and returns everything it wrote
     /// back. A fake display task drains `commands` and immediately acks,
     /// standing in for `main.rs`'s real display loop; `select` (rather than
     /// `join`) is used since that fake loop never terminates on its own —
     /// only `run_session` reaching a clean close ends the pair.
-    fn run(input: &str, wifi_outcome: Result<&'static str, &'static str>) -> std::string::String {
+    fn run(
+        input: &str,
+        wifi_outcome: Result<&'static str, &'static str>,
+        bond_outcome: Result<(), &'static str>,
+    ) -> std::string::String {
         let reader = FakeReader {
             bytes: input.as_bytes().to_vec(),
             pos: 0,
@@ -399,8 +442,11 @@ mod tests {
         let mut wifi = FakeWifi {
             outcome: wifi_outcome,
         };
+        let mut bond = FakeBondClear {
+            outcome: bond_outcome,
+        };
 
-        let session = run_session(reader, writer, &commands, &acks, &mut wifi);
+        let session = run_session(reader, writer, &commands, &acks, &mut wifi, &mut bond);
         let fake_display = async {
             loop {
                 commands.receive().await;
@@ -416,50 +462,63 @@ mod tests {
         Ok("10.0.0.5")
     }
 
+    fn ok_bond() -> Result<(), &'static str> {
+        Ok(())
+    }
+
     #[test]
     fn text_valid() {
-        assert_eq!(run("TEXT 12:34\n", ok_wifi()), "OK\n");
+        assert_eq!(run("TEXT 12:34\n", ok_wifi(), ok_bond()), "OK\n");
     }
 
     #[test]
     fn text_malformed_wrong_length() {
-        assert_eq!(run("TEXT 1234\n", ok_wifi()), "ERR bad args\n");
+        assert_eq!(run("TEXT 1234\n", ok_wifi(), ok_bond()), "ERR bad args\n");
     }
 
     #[test]
     fn text_malformed_bad_char() {
-        assert_eq!(run("TEXT ab:34\n", ok_wifi()), "ERR unsupported char\n");
+        assert_eq!(
+            run("TEXT ab:34\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\n"
+        );
     }
 
     #[test]
     fn clock_valid() {
-        assert_eq!(run("CLOCK\n", ok_wifi()), "OK\n");
+        assert_eq!(run("CLOCK\n", ok_wifi(), ok_bond()), "OK\n");
     }
 
     #[test]
     fn color_valid() {
-        assert_eq!(run("COLOR ff00aa\n", ok_wifi()), "OK\n");
+        assert_eq!(run("COLOR ff00aa\n", ok_wifi(), ok_bond()), "OK\n");
     }
 
     #[test]
     fn color_malformed_not_hex() {
-        assert_eq!(run("COLOR zzzzzz\n", ok_wifi()), "ERR bad args\n");
+        assert_eq!(
+            run("COLOR zzzzzz\n", ok_wifi(), ok_bond()),
+            "ERR bad args\n"
+        );
     }
 
     #[test]
     fn brightness_valid() {
-        assert_eq!(run("BRIGHTNESS 200\n", ok_wifi()), "OK\n");
+        assert_eq!(run("BRIGHTNESS 200\n", ok_wifi(), ok_bond()), "OK\n");
     }
 
     #[test]
     fn brightness_malformed_out_of_range() {
-        assert_eq!(run("BRIGHTNESS 999\n", ok_wifi()), "ERR bad args\n");
+        assert_eq!(
+            run("BRIGHTNESS 999\n", ok_wifi(), ok_bond()),
+            "ERR bad args\n"
+        );
     }
 
     #[test]
     fn wifi_valid_join_succeeds() {
         assert_eq!(
-            run("WIFI myssid mypassword\n", Ok("10.0.0.5")),
+            run("WIFI myssid mypassword\n", Ok("10.0.0.5"), ok_bond()),
             "OK 10.0.0.5\n"
         );
     }
@@ -467,14 +526,18 @@ mod tests {
     #[test]
     fn wifi_join_fails() {
         assert_eq!(
-            run("WIFI myssid mypassword\n", Err("wifi join failed")),
+            run(
+                "WIFI myssid mypassword\n",
+                Err("wifi join failed"),
+                ok_bond()
+            ),
             "ERR wifi join failed\n"
         );
     }
 
     #[test]
     fn wifi_malformed_missing_password() {
-        assert_eq!(run("WIFI myssid\n", ok_wifi()), "ERR bad args\n");
+        assert_eq!(run("WIFI myssid\n", ok_wifi(), ok_bond()), "ERR bad args\n");
     }
 
     #[test]
@@ -482,7 +545,7 @@ mod tests {
         // 33 bytes: one over the 32-byte SSID bound `parse_wifi` documents.
         let ssid = "a".repeat(33);
         let line = std::format!("WIFI {ssid} mypassword\n");
-        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
+        assert_eq!(run(&line, ok_wifi(), ok_bond()), "ERR bad args\n");
     }
 
     #[test]
@@ -490,17 +553,30 @@ mod tests {
         // 64 bytes: one over the 63-byte password bound `parse_wifi` documents.
         let password = "a".repeat(64);
         let line = std::format!("WIFI myssid {password}\n");
-        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
+        assert_eq!(run(&line, ok_wifi(), ok_bond()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn unpair_valid() {
+        assert_eq!(run("UNPAIR\n", ok_wifi(), ok_bond()), "OK\n");
+    }
+
+    #[test]
+    fn unpair_clear_fails() {
+        assert_eq!(
+            run("UNPAIR\n", ok_wifi(), Err("flash clear failed")),
+            "ERR flash clear failed\n"
+        );
     }
 
     #[test]
     fn unknown_command() {
-        assert_eq!(run("BOGUS\n", ok_wifi()), "ERR unknown command\n");
+        assert_eq!(run("BOGUS\n", ok_wifi(), ok_bond()), "ERR unknown command\n");
     }
 
     #[test]
     fn line_too_long() {
         let long_line = "TEXT ".to_string() + &"9".repeat(200) + "\n";
-        assert_eq!(run(&long_line, ok_wifi()), "ERR line too long\n");
+        assert_eq!(run(&long_line, ok_wifi(), ok_bond()), "ERR line too long\n");
     }
 }
