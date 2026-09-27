@@ -2,9 +2,18 @@ MEMORY {
     /*
      * The RP2350 has either external or internal flash.
      *
-     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
+     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB. The last
+     * 16 KiB of that is carved out below as BOND_STORAGE.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K - 16K
+    /*
+     * Reserved for `bond_store.rs`'s `sequential-storage` map: the single
+     * persisted BLE Bond record (ticket #6 / ADR-0002), wear-levelled
+     * across all 4 of these 4 KiB sectors under one fixed key. Living in
+     * its own linker region (rather than a hardcoded offset into FLASH)
+     * means the linker itself guarantees code can never grow into it.
+     */
+    BOND_STORAGE : ORIGIN = ORIGIN(FLASH) + LENGTH(FLASH), LENGTH = 16K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -73,3 +82,9 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+
+/* Offsets (not absolute addresses) into flash — what `embassy_rp::flash::
+ * Flash`'s `offset` parameters expect, and what `bond_store.rs` uses to
+ * size its `sequential-storage` map. */
+__bond_storage_start = ORIGIN(BOND_STORAGE) - ORIGIN(FLASH);
+__bond_storage_end = ORIGIN(BOND_STORAGE) + LENGTH(BOND_STORAGE) - ORIGIN(FLASH);

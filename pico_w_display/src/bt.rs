@@ -6,21 +6,28 @@
 //! the `embedded_io_async::Read`/`Write` traits it already expects, via
 //! [`BleReader`]/[`BleWriter`].
 //!
-//! Pairing is unconditionally bondable for now (`set_bondable(true)` on every
-//! connection) — the GP22 button-gated Bondable Window and flash bond
-//! persistence land in a follow-up ticket, so a bonded phone reconnects only
-//! for the life of the current power-on session.
+//! Pairing is gated by the GP22 [`pairing_window::BondableWindow`] (ADR-0002):
+//! a connection is only made bondable if the window is armed, and a Bond
+//! produced inside it is persisted via [`bond_store::BondStore`] so a
+//! previously-bonded phone reconnects with zero button presses, surviving a
+//! power cycle.
+use core::cell::Cell;
+
 use defmt::{info, warn};
 use embassy_futures::join::join;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
 use pico_w_display::protocol::{self, WifiJoin};
 use trouble_host::prelude::*;
+
+use crate::bond_store::BondStore;
+use crate::pairing_window::BondableWindow;
 
 /// [`CommandService`]'s UUID (`e3fcb01d-9492-4fa7-97db-63f3491b3f58` — a
 /// fresh random 128-bit UUID, not a standard GATT profile) as 16 bytes in
@@ -182,11 +189,20 @@ impl Write for BleWriter<'_> {
 /// Structurally parallel to `main.rs`'s USB session loop — `wifi` is a
 /// [`crate::wifi::SharedWifi`] handle so it can run concurrently with the USB
 /// session without both needing a simultaneous `&mut Wifi`.
+///
+/// `initial_bond` (loaded from flash by `main.rs` before this task starts)
+/// is registered with the stack immediately, so a previously-bonded phone
+/// can reconnect on the very first advertisement — no button press, even
+/// right after a power cycle. `window` gates whether new connections may
+/// bond at all; `bond_store` is where a fresh in-window Bond gets persisted.
 pub async fn run<J: WifiJoin>(
     controller: BtController,
     commands: &protocol::CommandChannel,
     acks: &protocol::AckChannel,
     mut wifi: J,
+    initial_bond: Option<BondInformation>,
+    window: &BondableWindow,
+    bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
 ) {
     // Fixed rather than derived from the chip's real BT MAC (no accessor for
     // it is wired up here) — fine for a single-device-per-app product; matches
@@ -208,21 +224,40 @@ pub async fn run<J: WifiJoin>(
     }))
     .unwrap();
 
+    // Tracks whichever identity is currently both persisted to flash and
+    // registered with `stack`, so a later, *different* phone bonding can
+    // evict it from `stack`'s own in-memory bond list — otherwise
+    // `add_bond_information` (see its doc comment) just accumulates one
+    // entry per distinct phone that's ever bonded this session, leaving an
+    // old phone still able to reconnect even though flash (and so the next
+    // power cycle) only ever remembers the newest one.
+    let known_identity: Cell<Option<Identity>> = Cell::new(initial_bond.as_ref().map(|b| b.identity));
+    if let Some(bond) = initial_bond {
+        info!("restoring persisted bond: {}", bond);
+        if stack.add_bond_information(bond).is_err() {
+            warn!("failed to restore persisted bond");
+        }
+    }
+
     join(ble_host_task(runner), async {
         loop {
             match advertise(&mut peripheral, &server).await {
                 Ok(conn) => {
                     info!("ble connected");
-                    // Bonding not yet gated by GP22 (follow-up ticket) —
-                    // every connection may bond for now.
-                    let _ = conn.raw().set_bondable(true);
+                    // Must happen before any pairing traffic arrives (see
+                    // `set_bondable`'s own doc comment) — right after accept
+                    // is the earliest point available. An unarmed window
+                    // still lets the connection encrypt, just not bond (see
+                    // ADR-0002's documented gap).
+                    let _ = conn.raw().set_bondable(window.is_armed());
 
                     let rx: BleRxChannel = Channel::new();
                     let disconnected: Disconnected = Signal::new();
                     let command = &server.command_service.command;
                     let reply = &server.command_service.reply;
 
-                    let events_fut = gatt_events_task(&conn, command, &rx, &disconnected);
+                    let events_fut =
+                        gatt_events_task(&conn, command, &rx, &disconnected, bond_store, &stack, &known_identity);
                     let reader = BleReader {
                         rx: &rx,
                         disconnected: &disconnected,
@@ -313,6 +348,9 @@ async fn gatt_events_task(
     command: &Characteristic<Vec<u8, CMD_LEN>>,
     rx: &BleRxChannel,
     disconnected: &Disconnected,
+    bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
+    stack: &Stack<'_, BtController, DefaultPacketPool>,
+    known_identity: &Cell<Option<Identity>>,
 ) {
     loop {
         match conn.next().await {
@@ -321,8 +359,28 @@ async fn gatt_events_task(
                 disconnected.signal(());
                 return;
             }
-            GattConnectionEvent::PairingComplete { security_level, .. } => {
+            GattConnectionEvent::PairingComplete { security_level, bond } => {
                 info!("ble pairing complete: {:?}", security_level);
+                // `bond` is only `Some` when the pairing happened inside an
+                // armed window (both sides bondable) — an unarmed pairing
+                // still completes (ADR-0002's documented gap) but leaves
+                // `bond: None`, so nothing gets persisted here.
+                if let Some(bond) = bond {
+                    // A *different* phone bonding must evict the old
+                    // identity from `stack`'s own in-memory list — flash
+                    // only ever holds the new one, but `stack` otherwise
+                    // keeps both, letting the old phone reconnect for the
+                    // rest of this power cycle. Same identity re-bonding
+                    // (e.g. re-pairing after an app-side "forget device")
+                    // just replaces in place, so there's nothing to evict.
+                    if let Some(previous) = known_identity.get()
+                        && !previous.match_identity(&bond.identity)
+                    {
+                        let _ = stack.remove_bond_information(previous);
+                    }
+                    known_identity.set(Some(bond.identity));
+                    bond_store.lock().await.save(&bond).await;
+                }
             }
             GattConnectionEvent::PairingFailed(err) => {
                 warn!("ble pairing failed: {:?}", err);

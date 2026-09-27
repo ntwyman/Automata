@@ -80,9 +80,11 @@ static_cell = "2.1.1"
 # BLE GATT transport. `default-packet-pool-mtu-128` matches the proven
 # `rp-pico-2-w` reference config (rather than the 251-byte default) — plenty
 # for `protocol::MAX_LINE_LEN`, and lighter on this MCU's RAM/DMA buffers.
-# `security` is needed for the encrypted `command`/`reply` characteristics;
-# bond persistence to flash is a follow-up ticket, so bonds are in-memory
-# only for now (lost on power cycle).
+# `security` is needed for the encrypted `command`/`reply` characteristics.
+# `serde` (which also flips on `bt-hci/serde` transitively) lets
+# `bond_store.rs` serialize `BondInformation` straight from its own field
+# definitions via `postcard`, rather than hand-packing byte offsets that
+# would silently drift if trouble-host ever adds a field.
 trouble-host = { version = "0.8", default-features = false, features = [
     "derive",
     "gatt",
@@ -90,8 +92,21 @@ trouble-host = { version = "0.8", default-features = false, features = [
     "default-packet-pool",
     "default-packet-pool-mtu-128",
     "security",
+    "serde",
     "defmt",
 ] }
+
+# Wear-levelled flash persistence for `bond_store.rs`'s single BLE Bond
+# record, over the `BOND_STORAGE` region `memory.x` reserves. The store uses
+# the built-in `()` key (there's only ever one record) and `postcard` to
+# serialize the value, matching trouble-host's own `serde` derives above.
+sequential-storage = { version = "8.0.1", default-features = false, features = [
+    "defmt",
+    "postcard",
+] }
+# For `bond_store.rs`'s `#[derive(Serialize, Deserialize)]` wrapper around
+# `BondInformation` — `no_std`, hence `default-features = false`.
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 # Host-only: `CriticalSectionRawMutex` needs a registered critical-section

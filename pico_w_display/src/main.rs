@@ -8,11 +8,12 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::join::join4;
+use embassy_futures::join::{join, join5};
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, PIO0, PIO1, USB};
+use embassy_rp::gpio::{Input, Pull};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
@@ -25,16 +26,18 @@ use smart_leds::colors;
 use trouble_host::prelude::ExternalController;
 use {defmt_rtt as _, panic_probe as _};
 
+mod bond_store;
 mod bt;
 mod fonts;
 mod grid;
+mod pairing_window;
 mod usb;
 mod wifi;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH3>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
 
@@ -110,14 +113,35 @@ async fn main(spawner: Spawner) {
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
 
-    let (wifi_dev, bt_device) = wifi::init(
-        spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
+    // Run concurrently: Wi-Fi bring-up (PIO1/DMA_CH1/DMA_CH2/the CYW43 GPIOs)
+    // and the flash bond scan (FLASH/DMA_CH3) touch disjoint peripherals, so
+    // there's no reason boot time should be their sum rather than their max.
+    let mut bond_store = bond_store::BondStore::new(p.FLASH, p.DMA_CH3);
+    let ((wifi_dev, bt_device), initial_bond) = join(
+        wifi::init(spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29),
+        bond_store.load(),
     )
     .await;
     // Shared rather than owned outright: the USB and BLE sessions below run
     // concurrently and each needs its own `WifiJoin` handle (see
     // `wifi::SharedWifi`), so a plain `&mut Wifi` can't work for both.
     let wifi_mutex: Mutex<CriticalSectionRawMutex, wifi::Wifi> = Mutex::new(wifi_dev);
+
+    // `initial_bond` (loaded above) lets a previously-bonded phone reconnect
+    // on `bt::run`'s very first advertisement — even right after this
+    // power-on — with no button press. `bond_store` itself is shared
+    // (rather than handed to `bt::run` outright) because a fresh pairing
+    // later in this same session also needs to write to it.
+    let bond_store_mutex: Mutex<CriticalSectionRawMutex, bond_store::BondStore> = Mutex::new(bond_store);
+
+    // GP22 (the board's BOOT/user button): pressing it arms the Bondable
+    // Window `bt::run` checks before allowing a new connection to bond (see
+    // `pairing_window`'s module docs and ADR-0002). No internal pull —
+    // ticket #4's hardware validation found the board already has an
+    // external one.
+    let button = Input::new(p.PIN_22, Pull::None);
+    let bondable_window = pairing_window::BondableWindow::new();
+    let pairing_window_fut = pairing_window::run(button, &bondable_window);
 
     // USB CDC-ACM serial port. All these buffers are plain locals, borrowed
     // for the rest of `main` rather than declared `'static` — nothing here is
@@ -149,6 +173,9 @@ async fn main(spawner: Spawner) {
         &commands,
         &acks,
         wifi::SharedWifi(&wifi_mutex),
+        initial_bond,
+        &bondable_window,
+        &bond_store_mutex,
     );
 
     let display_fut = async {
@@ -204,5 +231,5 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    join4(usb_fut, protocol_fut, ble_fut, display_fut).await;
+    join5(usb_fut, protocol_fut, ble_fut, display_fut, pairing_window_fut).await;
 }
