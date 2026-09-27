@@ -18,7 +18,7 @@ use cyw43::{Control, JoinOptions, aligned_bytes};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::unwrap;
 use embassy_executor::Spawner;
-use embassy_net::{Config, Ipv4Address, Stack, StackResources};
+use embassy_net::{Config, ConfigV4, Ipv4Address, Stack, StackResources};
 use embassy_rp::Peri;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::dma;
@@ -68,6 +68,10 @@ impl WifiJoin for Wifi {
                 .join(ssid, JoinOptions::new(password))
                 .await
                 .map_err(|_| "wifi join failed")?;
+            // DHCP only starts now, once actually associated — `init` leaves
+            // it off (see its own comment) so an unjoined device doesn't spam
+            // pointless DISCOVER broadcasts every 10s.
+            self.stack.set_config_v4(ConfigV4::Dhcp(Default::default()));
             self.stack.wait_config_up().await;
             Ok::<(), &'static str>(())
         })
@@ -154,7 +158,14 @@ pub async fn init(
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
-    let config = Config::dhcpv4(Default::default());
+    // No DHCP yet: starting it before the chip has associated with any AP
+    // just means `embassy-net`'s client retries a DISCOVER broadcast that
+    // can never be answered, every 10s, for as long as the device sits
+    // unjoined — real SPI/DMA bus traffic on the same PIO1 bus the CYW43439
+    // shares between Wi-Fi and Bluetooth, contending with the WS2812
+    // output's own DMA on PIO0 for no benefit. `WifiJoin::join` (above)
+    // turns DHCP on only once `control.join` has actually associated.
+    let config = Config::default();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
 
