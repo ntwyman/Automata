@@ -8,7 +8,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join5};
+use embassy_futures::join::join5;
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
@@ -113,19 +113,25 @@ async fn main(spawner: Spawner) {
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
 
-    // Run concurrently: Wi-Fi bring-up (PIO1/DMA_CH1/DMA_CH2/the CYW43 GPIOs)
-    // and the flash bond scan (FLASH/DMA_CH3) touch disjoint peripherals, so
-    // there's no reason boot time should be their sum rather than their max.
-    let mut bond_store = bond_store::BondStore::new(p.FLASH, p.DMA_CH3);
-    let ((wifi_dev, bt_device), initial_bond) = join(
-        wifi::init(spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29),
-        bond_store.load(),
+    let (wifi_dev, bt_device) = wifi::init(
+        spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
     )
     .await;
     // Shared rather than owned outright: the USB and BLE sessions below run
     // concurrently and each needs its own `WifiJoin` handle (see
     // `wifi::SharedWifi`), so a plain `&mut Wifi` can't work for both.
     let wifi_mutex: Mutex<CriticalSectionRawMutex, wifi::Wifi> = Mutex::new(wifi_dev);
+
+    // Deliberately sequential, *after* Wi-Fi bring-up finishes: the async
+    // flash read below runs on DMA_CH3, which shares `DMA_IRQ_0` with the
+    // Wi-Fi/BT DMA channels above, and `wifi::init`'s cyw43 bring-up is a
+    // timing-sensitive SPI-over-PIO exchange (firmware/NVRAM checksums) that
+    // doesn't tolerate an unrelated DMA channel's interrupts landing mid-
+    // transfer. Running these two concurrently (an earlier version of this
+    // code did, to shave boot time) reproduced SPI corruption on real
+    // hardware — not worth it for a one-time, sub-millisecond flash scan.
+    let mut bond_store = bond_store::BondStore::new(p.FLASH, p.DMA_CH3);
+    let initial_bond = bond_store.load().await;
 
     // `initial_bond` (loaded above) lets a previously-bonded phone reconnect
     // on `bt::run`'s very first advertisement — even right after this

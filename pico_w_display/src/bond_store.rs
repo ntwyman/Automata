@@ -102,6 +102,15 @@ impl BondStore {
     /// only ever one. Call from `bt.rs`'s `PairingComplete { bond: Some(_) }`
     /// handler, which only fires with `Some` when the pairing happened
     /// inside an armed Bondable Window (both sides bondable).
+    ///
+    /// A brief (tens-of-ms, once per successful pairing) system-wide hiccup
+    /// is expected here: `embassy_rp::flash`'s erase/write both run in a
+    /// critical section — disconnecting flash from XIP execution requires
+    /// it, not a choice made here — which will glitch the WS2812 output and
+    /// any concurrent cyw43 SPI traffic for that span. Unlike the `load()`
+    /// DMA read `main.rs` deliberately keeps off the boot-time critical
+    /// path, this can't be scheduled around: it only happens on a user-
+    /// triggered pairing, and there's no way to persist a Bond without it.
     pub async fn save(&mut self, bond: &BondInformation) {
         let record = StoredBond(bond.clone());
         match self.map.store_item(&mut self.buf, &(), &record).await {
