@@ -21,6 +21,15 @@ abstract interface class BleLink {
   /// if encryption fails or is refused.
   Future<void> secure({required bool pairing});
 
+  /// Writes one Command line (no terminator) to `command`. Only valid once
+  /// [secure] has completed. Must never log [line]: it may carry a Wi-Fi
+  /// password.
+  Future<void> writeLine(String line);
+
+  /// One line per `reply` notification, as the firmware sent it. Only
+  /// carries anything once [secure] has subscribed.
+  Stream<String> get replyLines;
+
   /// Deliberately closes the link.
   Future<void> disconnect();
 

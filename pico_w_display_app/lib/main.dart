@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'ble/device_connection.dart';
 import 'ble/flutter_blue_central.dart';
 import 'ble/shared_prefs_known_device_store.dart';
+import 'screens/control_screen.dart';
+import 'screens/link_banner.dart';
 import 'screens/pairing_screen.dart';
 
 void main() {
@@ -28,6 +30,22 @@ class PicoWDisplayApp extends StatelessWidget {
         colorSchemeSeed: Colors.deepPurple,
         brightness: Brightness.dark,
       ),
+      builder: (context, screen) => ValueListenableBuilder(
+        valueListenable: connection.state,
+        builder: (context, state, _) => Column(
+          children: [
+            LinkBanner(state: state),
+            Expanded(
+              // The banner already sits under the status bar.
+              child: MediaQuery.removePadding(
+                context: context,
+                removeTop: true,
+                child: screen!,
+              ),
+            ),
+          ],
+        ),
+      ),
       home: ValueListenableBuilder(
         valueListenable: connection.state,
         builder: (context, state, _) => switch (state) {
@@ -50,9 +68,11 @@ class PicoWDisplayApp extends StatelessWidget {
               ),
             ],
           ),
-          // Placeholder until the control screen lands (#9).
-          Connected() => const _StatusScreen(
-            message: 'Connected to your display.',
+          // Keyed by link so a reconnect starts the screen afresh on the
+          // new link rather than reusing the dropped one's CommandClient.
+          Connected(:final link) => ControlScreen(
+            key: ObjectKey(link),
+            link: link,
           ),
         },
       ),

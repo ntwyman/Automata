@@ -189,6 +189,12 @@ class FakeBleLink implements BleLink {
 
   @override
   Future<void> disconnect() async => disconnected = true;
+
+  @override
+  Future<void> writeLine(String line) async {}
+
+  @override
+  Stream<String> get replyLines => const Stream.empty();
 }
 
 class FakeBleCentral implements BleCentral {

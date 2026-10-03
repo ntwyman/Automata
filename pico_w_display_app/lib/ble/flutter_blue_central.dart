@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show latin1;
 import 'dart:io' show Platform;
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -99,6 +100,8 @@ class FlutterBlueLink implements BleLink {
   FlutterBlueLink(this._device);
 
   final BluetoothDevice _device;
+  BluetoothCharacteristic? _command;
+  BluetoothCharacteristic? _reply;
 
   @override
   Future<void> secure({required bool pairing}) async {
@@ -127,7 +130,24 @@ class FlutterBlueLink implements BleLink {
     // `read_line` skips without dispatching a Command or sending a reply.
     await command.write([0x0a]);
     await reply.setNotifyValue(true);
+    _command = command;
+    _reply = reply;
   }
+
+  // `flutter_blue_plus` echoes written values to the console only at
+  // `LogLevel.verbose`; leave it below that, or `WIFI` passwords get logged.
+  @override
+  Future<void> writeLine(String line) async {
+    final command = _command;
+    if (command == null) throw StateError('Link is not secured yet.');
+    await command.write(latin1.encode(line));
+  }
+
+  // The firmware only ever replies in ASCII; `latin1` decodes any byte
+  // rather than throwing on a garbled one.
+  @override
+  Stream<String> get replyLines =>
+      _reply?.onValueReceived.map(latin1.decode) ?? const Stream.empty();
 
   @override
   Future<void> disconnect() => _device.disconnect();
