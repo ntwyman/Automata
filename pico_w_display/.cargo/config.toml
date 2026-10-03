@@ -6,4 +6,8 @@ runner = "probe-rs run --chip RP235x"
 target = "thumbv8m.main-none-eabihf"
 
 [env]
-DEFMT_LOG = "debug"
+# cyw43 stays at info: at debug it dumps every ioctl/iovar payload, and the
+# `WIFI` join's `SetWsecPmk`/`sae_password` payloads are the plaintext
+# password, defeating `protocol.rs`'s own `recv: WIFI <redacted>`. Lower it
+# locally (`DEFMT_LOG=debug cargo run ...`) only when debugging the chip.
+DEFMT_LOG = "debug,cyw43=info"
