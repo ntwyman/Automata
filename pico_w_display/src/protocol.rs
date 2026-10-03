@@ -12,6 +12,9 @@
 //! Enter key sends a bare `\r` with no local echo by default. Every command
 //! gets exactly one reply line: `OK` on success, or `ERR <reason>` on
 //! failure. See the commands handled in [`parse_line`].
+//!
+//! The grammar is ASCII-only: a line holding any byte outside ASCII is
+//! rejected whole with `ERR unsupported char`, never parsed.
 
 use core::fmt::Write as _;
 
@@ -227,16 +230,25 @@ enum Line {
     /// The line exceeded [`MAX_LINE_LEN`]; bytes up to the next `\n` were
     /// discarded to resynchronize, and no attempt was made to parse it.
     TooLong,
+    /// The line held a byte outside ASCII, so it was dropped unparsed. The
+    /// grammar is ASCII-only, and keeping such bytes out of `buf` is what
+    /// makes byte-offset slicing of a [`Line::Ready`] line safe: stored as
+    /// `byte as char`, each would become a 2-byte UTF-8 char.
+    NonAscii,
 }
 
-/// Reads bytes until a `\r` or `\n`, appending them into `buf` (cleared by
-/// the caller first). A terminator seen while `buf` is still empty is just a
-/// blank line — most commonly the second half of a `\r\n`/`\n\r` pair — and
-/// is skipped rather than reported, so CR-only, LF-only and CRLF senders all
-/// work. Returns `Err(())` on any transport error, or a clean close (`read`
-/// == 0 bytes) — both mean the session is over.
+/// Reads bytes until a `\r` or `\n`, appending the line's ASCII bytes into
+/// `buf` (cleared by the caller first). A terminator with no bytes before it
+/// is just a blank line — most commonly the second half of a `\r\n`/`\n\r`
+/// pair — and is skipped rather than reported, so CR-only, LF-only and CRLF
+/// senders all work. Every byte, ASCII or not, counts toward
+/// [`MAX_LINE_LEN`], and a too-long line is reported as [`Line::TooLong`]
+/// even if it also held non-ASCII bytes. Returns `Err(())` on any transport
+/// error, or a clean close (`read` == 0 bytes) — both mean the session is
+/// over.
 async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> Result<Line, ()> {
-    let mut overflowed = false;
+    let mut len = 0usize;
+    let mut non_ascii = false;
     let mut byte = [0u8; 1];
     loop {
         let n = reader.read(&mut byte).await.map_err(|_| ())?;
@@ -244,17 +256,23 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
             return Err(());
         }
         if byte[0] == b'\r' || byte[0] == b'\n' {
-            if buf.is_empty() && !overflowed {
+            if len == 0 {
                 continue;
             }
-            return Ok(if overflowed {
+            return Ok(if len > MAX_LINE_LEN {
                 Line::TooLong
+            } else if non_ascii {
+                Line::NonAscii
             } else {
                 Line::Ready
             });
         }
-        if !overflowed && buf.push(byte[0] as char).is_err() {
-            overflowed = true;
+        len = len.saturating_add(1);
+        if !byte[0].is_ascii() {
+            non_ascii = true;
+        } else if len <= MAX_LINE_LEN {
+            // Can't fail: at most `len` bytes have been pushed.
+            let _ = buf.push(byte[0] as char);
         }
     }
 }
@@ -287,6 +305,10 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
         match outcome {
             Line::TooLong => {
                 let _ = reply.push_str("ERR line too long\n");
+            }
+            // Never logged: it could be a `WIFI` line carrying a password.
+            Line::NonAscii => {
+                let _ = writeln!(reply, "ERR {}", ProtocolError::UnsupportedChar.reason());
             }
             Line::Ready => {
                 // Logged before parsing so malformed lines are still visible
@@ -419,18 +441,27 @@ mod tests {
         }
     }
 
-    /// Feeds `input` through [`run_session`] and returns everything it wrote
-    /// back. A fake display task drains `commands` and immediately acks,
-    /// standing in for `main.rs`'s real display loop; `select` (rather than
-    /// `join`) is used since that fake loop never terminates on its own —
-    /// only `run_session` reaching a clean close ends the pair.
+    /// [`run_bytes`] for input that's valid UTF-8, which is nearly all of it.
     fn run(
         input: &str,
         wifi_outcome: Result<&'static str, &'static str>,
         bond_outcome: Result<(), &'static str>,
     ) -> std::string::String {
+        run_bytes(input.as_bytes(), wifi_outcome, bond_outcome)
+    }
+
+    /// Feeds raw `input` bytes through [`run_session`] and returns everything
+    /// it wrote back. A fake display task drains `commands` and immediately
+    /// acks, standing in for `main.rs`'s real display loop; `select` (rather
+    /// than `join`) is used since that fake loop never terminates on its own
+    /// — only `run_session` reaching a clean close ends the pair.
+    fn run_bytes(
+        input: &[u8],
+        wifi_outcome: Result<&'static str, &'static str>,
+        bond_outcome: Result<(), &'static str>,
+    ) -> std::string::String {
         let reader = FakeReader {
-            bytes: input.as_bytes().to_vec(),
+            bytes: input.to_vec(),
             pos: 0,
         };
         let mut written = std::vec::Vec::new();
@@ -572,6 +603,72 @@ mod tests {
     #[test]
     fn unknown_command() {
         assert_eq!(run("BOGUS\n", ok_wifi(), ok_bond()), "ERR unknown command\n");
+    }
+
+    #[test]
+    fn non_ascii_color_args() {
+        assert_eq!(
+            run_bytes(b"COLOR a\xe9\xe9b\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\n"
+        );
+    }
+
+    #[test]
+    fn non_ascii_in_first_four_chars() {
+        // Within the prefix `run_session` checks for `WIFI` before parsing.
+        assert_eq!(
+            run_bytes(b"abc\xe9\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\n"
+        );
+    }
+
+    #[test]
+    fn non_ascii_line_then_valid_command() {
+        assert_eq!(
+            run_bytes(b"abc\xe9\nCLOCK\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\nOK\n"
+        );
+    }
+
+    #[test]
+    fn non_ascii_wifi_never_joins() {
+        // The canned `Ok` join outcome would reply `OK 10.0.0.5` if the line
+        // were parsed and dispatched.
+        assert_eq!(
+            run_bytes(b"WIFI net p\xe9ss\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\n"
+        );
+    }
+
+    #[test]
+    fn non_ascii_only_line() {
+        assert_eq!(
+            run_bytes(b"\xe9\xe9\nCLOCK\n", ok_wifi(), ok_bond()),
+            "ERR unsupported char\nOK\n"
+        );
+    }
+
+    #[test]
+    fn line_too_long_counting_non_ascii() {
+        // 120 raw bytes: too long, even though only 60 are storable ASCII.
+        let mut line = std::vec![b'9'; 60];
+        line.extend(core::iter::repeat_n(0xe9, 60));
+        line.push(b'\n');
+        assert_eq!(
+            run_bytes(&line, ok_wifi(), ok_bond()),
+            "ERR line too long\n"
+        );
+    }
+
+    #[test]
+    fn line_too_long_with_non_ascii() {
+        let mut line = b"TEXT \xe9".to_vec();
+        line.extend(core::iter::repeat_n(b'9', 200));
+        line.push(b'\n');
+        assert_eq!(
+            run_bytes(&line, ok_wifi(), ok_bond()),
+            "ERR line too long\n"
+        );
     }
 
     #[test]
