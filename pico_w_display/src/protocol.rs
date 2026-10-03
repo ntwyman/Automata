@@ -72,6 +72,14 @@ pub trait BondClear {
     async fn clear(&mut self) -> Result<(), &'static str>;
 }
 
+/// What a transport needs to provide so [`run_session`] can answer `TIME`
+/// without depending on any concrete clock. Like `WIFI`/`UNPAIR`, `TIME` is
+/// answered directly and never reaches the display loop.
+pub trait WallClock {
+    /// The current UTC time as Unix seconds, or `None` while Unsynced.
+    fn utc_now(&self) -> Option<u64>;
+}
+
 /// Longest line we'll accept; comfortably longer than any real command (the
 /// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
 /// rejected as `ERR line too long` rather than silently truncated.
@@ -81,9 +89,10 @@ pub trait BondClear {
 /// can size its backing buffer off the same bound instead of duplicating it.
 pub const MAX_LINE_LEN: usize = 104;
 
-/// Longest reply line `run_session` ever writes (`OK <ipv4 addr>\n` is the
-/// longest case). `pub` for the same reason as [`MAX_LINE_LEN`]: the BLE
-/// `reply` characteristic sizes its backing buffer off this bound.
+/// Longest reply line `run_session` ever writes (`OK <ISO-8601 UTC>\n`,
+/// 24 bytes, is the longest case). `pub` for the same reason as
+/// [`MAX_LINE_LEN`]: the BLE `reply` characteristic sizes its backing buffer
+/// off this bound.
 pub const MAX_REPLY_LEN: usize = 40;
 
 /// The display loop's side of every Session: Sessions hand it [`Command`]s,
@@ -149,7 +158,7 @@ pub enum Command {
     /// Render this exact 5-character `DD:DD`-shaped string with the existing
     /// digit/colon font, replacing the clock until [`Command::Clock`] is sent.
     Text(String<5>),
-    /// Resume the automatic elapsed-time clock display.
+    /// Resume showing the Wall Clock.
     Clock,
     /// Set the foreground color used to draw glyphs.
     Color(RGB8),
@@ -166,6 +175,8 @@ enum ParsedLine {
     /// Clear the persisted Bond, handled directly in [`run_session`] like
     /// `Wifi` since it has nothing to do with the grid.
     Unpair,
+    /// Report the Wall Clock's UTC, handled directly in [`run_session`].
+    Time,
 }
 
 #[derive(defmt::Format)]
@@ -206,6 +217,8 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         parse_wifi(rest)
     } else if cmd.eq_ignore_ascii_case("UNPAIR") {
         Ok(ParsedLine::Unpair)
+    } else if cmd.eq_ignore_ascii_case("TIME") {
+        Ok(ParsedLine::Time)
     } else {
         Err(ProtocolError::UnknownCommand)
     }
@@ -334,12 +347,13 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
+pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallClock>(
     mut reader: R,
     mut writer: W,
     display: &DisplayMailbox,
     wifi: &mut J,
     bond: &mut U,
+    clock: &C,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -390,6 +404,14 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
                         }
                         Err(reason) => {
                             let _ = writeln!(reply, "ERR {}", reason);
+                        }
+                    },
+                    Ok(ParsedLine::Time) => match clock.utc_now() {
+                        Some(utc) => {
+                            let _ = writeln!(reply, "OK {}", crate::wall_clock::iso8601(utc));
+                        }
+                        None => {
+                            let _ = reply.push_str("ERR not synced\n");
                         }
                     },
                     Err(e) => {
@@ -491,6 +513,15 @@ mod tests {
         }
     }
 
+    /// A [`WallClock`] stopped at a canned instant, or Unsynced if `None`.
+    struct FakeClock(Option<u64>);
+
+    impl WallClock for FakeClock {
+        fn utc_now(&self) -> Option<u64> {
+            self.0
+        }
+    }
+
     /// [`run_bytes`] for input that's valid UTF-8, which is nearly all of it.
     fn run(
         input: &str,
@@ -510,6 +541,16 @@ mod tests {
         wifi_outcome: Result<&'static str, &'static str>,
         bond_outcome: Result<(), &'static str>,
     ) -> std::string::String {
+        run_with_clock(input, wifi_outcome, bond_outcome, None)
+    }
+
+    /// [`run_bytes`] with the Wall Clock reading `utc` (`None`: Unsynced).
+    fn run_with_clock(
+        input: &[u8],
+        wifi_outcome: Result<&'static str, &'static str>,
+        bond_outcome: Result<(), &'static str>,
+        utc: Option<u64>,
+    ) -> std::string::String {
         let reader = FakeReader {
             bytes: input.to_vec(),
             pos: 0,
@@ -526,7 +567,9 @@ mod tests {
             outcome: bond_outcome,
         };
 
-        let session = run_session(reader, writer, &display, &mut wifi, &mut bond);
+        let clock = FakeClock(utc);
+
+        let session = run_session(reader, writer, &display, &mut wifi, &mut bond, &clock);
         let fake_display = async {
             loop {
                 display.receive().await;
@@ -647,6 +690,28 @@ mod tests {
             run("UNPAIR\n", ok_wifi(), Err("flash clear failed")),
             "ERR flash clear failed\n"
         );
+    }
+
+    #[test]
+    fn time_synced_replies_iso8601_utc() {
+        // 2026-10-03T12:34:56Z.
+        assert_eq!(
+            run_with_clock(b"TIME\n", ok_wifi(), ok_bond(), Some(1_791_030_896)),
+            "OK 2026-10-03T12:34:56Z\n"
+        );
+    }
+
+    #[test]
+    fn time_is_case_insensitive() {
+        assert_eq!(
+            run_with_clock(b"time\n", ok_wifi(), ok_bond(), Some(0)),
+            "OK 1970-01-01T00:00:00Z\n"
+        );
+    }
+
+    #[test]
+    fn time_unsynced() {
+        assert_eq!(run("TIME\n", ok_wifi(), ok_bond()), "ERR not synced\n");
     }
 
     #[test]
@@ -879,7 +944,7 @@ mod tests {
                 };
                 let mut wifi = FakeWifi { outcome: ok_wifi() };
                 let mut bond = FakeBondClear { outcome: ok_bond() };
-                run_session(reader, writer, display, &mut wifi, &mut bond).await;
+                run_session(reader, writer, display, &mut wifi, &mut bond, &FakeClock(None)).await;
                 log.borrow_mut().push(Event::Ended(id));
             }
         };

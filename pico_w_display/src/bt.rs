@@ -23,7 +23,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
-use pico_w_display::protocol::{self, WifiJoin};
+use pico_w_display::protocol::{self, WallClock, WifiJoin};
 use trouble_host::prelude::*;
 
 use crate::bond_store::{Bonds, BondStore};
@@ -197,11 +197,12 @@ impl Write for BleWriter<'_> {
 /// right after a power cycle. `window` gates whether new connections may
 /// bond at all; `bonds` is where a fresh in-window Bond gets persisted, and
 /// where `UNPAIR` (over either transport) signals this loop to evict its
-/// in-memory copy.
-pub async fn run<J: WifiJoin>(
+/// in-memory copy. `clock` answers `TIME`.
+pub async fn run<J: WifiJoin, C: WallClock>(
     controller: BtController,
     display: &protocol::DisplayMailbox,
     mut wifi: J,
+    clock: &C,
     initial_bond: Option<BondInformation>,
     window: &BondableWindow,
     mut bonds: Bonds<'_>,
@@ -284,7 +285,7 @@ pub async fn run<J: WifiJoin>(
                     };
                     let writer = BleWriter { conn: &conn, reply };
                     let session_fut = protocol::run_session(
-                        reader, writer, display, &mut wifi, &mut bonds,
+                        reader, writer, display, &mut wifi, &mut bonds, clock,
                     );
 
                     // `join`, not `select`: `session_fut` must run to its own

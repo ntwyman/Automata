@@ -10,6 +10,9 @@
 //! PIO/SPI/DMA directly, it only gets handed the `BtDriver` this module
 //! returns.
 //!
+//! The `embassy-net` [`Stack`] is handed back too, for `ntp.rs`'s SNTP
+//! Sync; `Stack<'static>` is `Copy`, so it and [`Wifi`] each hold one.
+//!
 //! Firmware blobs are vendored under `cyw43-firmware/` at the repo root,
 //! fetched from the embassy-rs project (see the LICENSE file there).
 
@@ -106,8 +109,9 @@ impl WifiJoin for SharedWifi<'_> {
 
 /// Brings up the CYW43439 chip's Wi-Fi and Bluetooth radios and spawns the
 /// one driver task that drives both. Call once from `main`; the returned
-/// [`Wifi`] handle joins a network on demand, and the returned [`BtDriver`]
-/// is handed to `bt::run` to build the GATT peripheral on top of.
+/// [`Wifi`] handle joins a network on demand, the returned [`BtDriver`] is
+/// handed to `bt::run` to build the GATT peripheral on top of, and the
+/// returned [`Stack`] is for `ntp::task`.
 // One parameter per distinct hardware peripheral this chip's bring-up
 // actually needs — grouping them into a struct would just move the same
 // count to a constructor `main.rs` still has to fill in one field at a time.
@@ -121,7 +125,7 @@ pub async fn init(
     dio_pin: Peri<'static, PIN_24>,
     cs_pin: Peri<'static, PIN_25>,
     clk_pin: Peri<'static, PIN_29>,
-) -> (Wifi, BtDriver<'static>) {
+) -> (Wifi, BtDriver<'static>, Stack<'static>) {
     let fw = aligned_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = aligned_bytes!("../cyw43-firmware/43439A0_clm.bin");
     let btfw = aligned_bytes!("../cyw43-firmware/43439A0_btfw.bin");
@@ -169,7 +173,9 @@ pub async fn init(
     let mut rng = RoscRng;
     let seed = rng.next_u64();
 
-    static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
+    // One socket each: the DHCP client, `ntp.rs`'s DNS query, and its UDP
+    // socket.
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         net_device,
         config,
@@ -178,5 +184,5 @@ pub async fn init(
     );
     spawner.spawn(unwrap!(net_task(runner)));
 
-    (Wifi { control, stack }, bt_device)
+    (Wifi { control, stack }, bt_device, stack)
 }

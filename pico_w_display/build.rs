@@ -32,4 +32,13 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
+
+    // `ntp.rs` rejects any Sync before the start of the build year. Only
+    // refreshed when this script reruns (see `rerun-if-changed` above), so it
+    // can lag the real build date — which only makes that check looser.
+    let build_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    println!("cargo:rustc-env=BUILD_UNIX_SECS={build_unix_secs}");
 }

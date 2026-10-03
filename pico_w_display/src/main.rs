@@ -1,6 +1,7 @@
-//! Displays elapsed time since boot in mm:ss format on a 17x17 WS2812 LED grid,
-//! or whatever a client connected over USB serial asks for instead. See
-//! `protocol.rs` for the command set.
+//! Displays the NTP-synced Wall Clock (UTC, 24-hour `HH:MM`) on a 17x17
+//! WS2812 LED grid, or whatever a client connected over USB serial or BLE
+//! asks for instead. See `protocol.rs` for the command set and `ntp.rs` for
+//! Syncing.
 
 #![no_std]
 #![no_main]
@@ -9,7 +10,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join5;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Input, Pull};
@@ -19,9 +20,9 @@ use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, Ticker};
+use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
-use pico_w_display::protocol;
+use pico_w_display::{protocol, wall_clock};
 use smart_leds::colors;
 use trouble_host::prelude::ExternalController;
 use {defmt_rtt as _, panic_probe as _};
@@ -30,6 +31,7 @@ mod bond_store;
 mod bt;
 mod fonts;
 mod grid;
+mod ntp;
 mod pairing_window;
 mod usb;
 mod wifi;
@@ -42,11 +44,11 @@ bind_interrupts!(struct Irqs {
 });
 
 // Display layout on 17x17 grid (digits are 3 wide x 6 tall):
-//   x=0  : tens of minutes
-//   x=4  : units of minutes
+//   x=0  : tens of hours
+//   x=4  : units of hours
 //   x=8  : colon (1 wide)
-//   x=10 : tens of seconds
-//   x=14 : units of seconds
+//   x=10 : tens of minutes
+//   x=14 : units of minutes
 //   y=5  : vertically centred ((17 - 6) / 2 = 5)
 const DIGIT_Y: usize = 5;
 const DIGIT_COLS: [usize; 4] = [0, 4, 10, 14];
@@ -54,38 +56,67 @@ const COLON_X: usize = 8;
 
 type DisplayGrid<'d> = grid::Grid<'d, 17, 289>;
 
-/// What the grid is currently showing: the automatic clock, or a client-set
+/// What the grid is currently showing: the Wall Clock, or a client-set
 /// string held as its four digits (colon is implicit, same position always).
 enum DisplayMode {
     Clock,
     Text([u8; 4]),
 }
 
-/// Draws four digits with a colon between the pair, in the fixed clock layout.
-fn render_digits(grid: &mut DisplayGrid, digits: [u8; 4]) {
-    grid.clear();
-    for (i, &d) in digits.iter().enumerate() {
-        if let Some(glyph) = fonts::get_digit_glyph(d) {
-            grid.blit_glyph(DIGIT_COLS[i], DIGIT_Y, glyph);
-        }
-    }
-    grid.blit_glyph(COLON_X, DIGIT_Y, fonts::get_colon_glyph());
+/// One frame in the fixed clock layout: four cells (`None` draws a dash)
+/// and whether the colon is lit.
+#[derive(Clone, Copy, PartialEq)]
+struct Frame {
+    cells: [Option<u8>; 4],
+    colon: bool,
 }
 
-/// Computes (total whole seconds elapsed, its four display digits) at `now`.
-fn clock_digits(now: Instant, start: Instant) -> (u64, [u8; 4]) {
-    let total_secs = (now - start).as_secs();
-    let mm = (total_secs / 60) % 100;
-    let ss = total_secs % 60;
-    (
-        total_secs,
-        [
-            (mm / 10) as u8,
-            (mm % 10) as u8,
-            (ss / 10) as u8,
-            (ss % 10) as u8,
-        ],
-    )
+/// `--:--` with a solid colon: the Wall Clock before the first Sync.
+const UNSYNCED: Frame = Frame {
+    cells: [None; 4],
+    colon: true,
+};
+
+impl Frame {
+    fn digits(digits: [u8; 4], colon: bool) -> Self {
+        Frame {
+            cells: digits.map(Some),
+            colon,
+        }
+    }
+}
+
+fn render(grid: &mut DisplayGrid, frame: Frame) {
+    grid.clear();
+    for (i, cell) in frame.cells.iter().enumerate() {
+        match cell {
+            Some(d) => {
+                if let Some(glyph) = fonts::get_digit_glyph(*d) {
+                    grid.blit_glyph(DIGIT_COLS[i], DIGIT_Y, glyph);
+                }
+            }
+            None => grid.blit_glyph(DIGIT_COLS[i], DIGIT_Y, fonts::get_dash_glyph()),
+        }
+    }
+    if frame.colon {
+        grid.blit_glyph(COLON_X, DIGIT_Y, fonts::get_colon_glyph());
+    }
+}
+
+/// What `mode` shows at `now` given the last Sync (`boot_utc_ms`, see
+/// `ntp::WALL_CLOCK`), and when that next changes on its own — `None` if
+/// only a Command or a Sync can change it.
+fn frame_at(mode: &DisplayMode, boot_utc_ms: Option<u64>, now: Instant) -> (Frame, Option<Instant>) {
+    match (mode, boot_utc_ms) {
+        (DisplayMode::Text(digits), _) => (Frame::digits(*digits, true), None),
+        (DisplayMode::Clock, None) => (UNSYNCED, None),
+        (DisplayMode::Clock, Some(boot_utc_ms)) => {
+            let utc_ms = ntp::utc_ms(boot_utc_ms, now);
+            let face = wall_clock::face(utc_ms);
+            let next = now + Duration::from_millis(wall_clock::ms_until_change(utc_ms));
+            (Frame::digits(face.digits, face.colon), Some(next))
+        }
+    }
 }
 
 /// Parses the validated `DD:DD` string from [`protocol::Command::Text`] into
@@ -113,10 +144,12 @@ async fn main(spawner: Spawner) {
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
 
-    let (wifi_dev, bt_device) = wifi::init(
+    let (wifi_dev, bt_device, net_stack) = wifi::init(
         spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
     )
     .await;
+    // Idles on `wait_config_up` until a `WIFI` join gets a DHCP lease.
+    spawner.spawn(unwrap!(ntp::task(net_stack)));
     // Shared rather than owned outright: the USB and BLE sessions below run
     // concurrently and each needs its own `WifiJoin` handle (see
     // `wifi::SharedWifi`), so a plain `&mut Wifi` can't work for both.
@@ -183,6 +216,7 @@ async fn main(spawner: Spawner) {
                 &display,
                 &mut wifi,
                 &mut bonds,
+                &ntp::Clock,
             )
             .await;
             info!("serial client disconnected");
@@ -194,6 +228,7 @@ async fn main(spawner: Spawner) {
         ble_controller,
         &display,
         wifi::SharedWifi(&wifi_mutex),
+        &ntp::Clock,
         initial_bond,
         &bondable_window,
         bond_store::Bonds {
@@ -203,54 +238,44 @@ async fn main(spawner: Spawner) {
     );
 
     let display_fut = async {
-        let start = Instant::now();
+        let mut syncs = unwrap!(ntp::WALL_CLOCK.receiver());
+        let mut boot_utc_ms: Option<u64> = None;
         let mut mode = DisplayMode::Clock;
-        let mut last_secs = u64::MAX; // force a draw on the first tick
-        let mut ticker = Ticker::every(Duration::from_millis(100));
+        let mut shown: Option<Frame> = None;
 
         loop {
-            match select(ticker.next(), display.receive()).await {
-                Either::First(()) => {
-                    // Ticks only drive redraws while the clock is showing;
-                    // manually-set text sits still until changed again.
-                    if let DisplayMode::Clock = mode {
-                        let (secs, digits) = clock_digits(Instant::now(), start);
-                        if secs != last_secs {
-                            last_secs = secs;
-                            info!(
-                                "elapsed {:02}:{:02}",
-                                digits[0] * 10 + digits[1],
-                                digits[2] * 10 + digits[3]
-                            );
-                            render_digits(&mut grd, digits);
-                            grd.update().await;
-                        }
-                    }
+            let (frame, next_change) = frame_at(&mode, boot_utc_ms, Instant::now());
+            if shown != Some(frame) {
+                render(&mut grd, frame);
+                grd.update().await;
+                shown = Some(frame);
+            }
+
+            let tick = async {
+                match next_change {
+                    Some(at) => Timer::at(at).await,
+                    None => core::future::pending().await,
                 }
-                Either::Second(command) => {
+            };
+            match select3(tick, display.receive(), syncs.changed()).await {
+                Either3::First(()) => {}
+                Either3::Second(command) => {
                     match command {
-                        protocol::Command::Clock => {
-                            mode = DisplayMode::Clock;
-                            last_secs = u64::MAX; // force an immediate redraw below
-                        }
+                        protocol::Command::Clock => mode = DisplayMode::Clock,
                         protocol::Command::Text(s) => mode = DisplayMode::Text(text_digits(&s)),
                         protocol::Command::Color(c) => grd.set_foreground(c),
                         protocol::Command::Brightness(b) => grd.set_brightness(b),
                     }
-
-                    let digits = match mode {
-                        DisplayMode::Clock => {
-                            let (secs, digits) = clock_digits(Instant::now(), start);
-                            last_secs = secs;
-                            digits
-                        }
-                        DisplayMode::Text(digits) => digits,
-                    };
-                    render_digits(&mut grd, digits);
+                    // Always redrawn, even if the frame is unchanged (e.g.
+                    // `COLOR`), and before the ack so `OK` means it's shown.
+                    let (frame, _) = frame_at(&mode, boot_utc_ms, Instant::now());
+                    render(&mut grd, frame);
                     grd.update().await;
+                    shown = Some(frame);
 
                     display.ack().await;
                 }
+                Either3::Third(synced) => boot_utc_ms = Some(synced),
             }
         }
     };

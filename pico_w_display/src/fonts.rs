@@ -54,6 +54,16 @@ const GLYPH_8: Glyph6by3 = Glyph6by3 {
 const GLYPH_9: Glyph6by3 = Glyph6by3 {
     data: [0b00011000, 0b00100101, 0b00011110],
 };
+// A 3x2 bar across the middle rows (2 and 3), between the colon's dots.
+const GLYPH_DASH: Glyph6by3 = Glyph6by3 {
+    data: [0b00001100, 0b00001100, 0b00001100],
+};
+
+/// The `-` of the Unsynced `--:--` face.
+pub fn get_dash_glyph() -> impl Glyph {
+    &GLYPH_DASH
+}
+
 struct Glyph6by1 {
     data: u8,
 }

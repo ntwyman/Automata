@@ -70,10 +70,13 @@ embassy-usb = { version = "0.6.0", features = ["defmt"] }
 
 cyw43 = { version = "0.7.0", features = ["defmt", "bluetooth"] }
 cyw43-pio = { version = "0.10.0", features = ["defmt"] }
+# `udp` + `dns` are for `ntp.rs`'s SNTP Sync against `pool.ntp.org`.
 embassy-net = { version = "0.9.1", features = [
     "defmt",
     "dhcpv4",
     "medium-ethernet",
+    "udp",
+    "dns",
 ] }
 static_cell = "2.1.1"
 
