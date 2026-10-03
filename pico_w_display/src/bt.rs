@@ -68,8 +68,9 @@ type BleRxChannel = Channel<CriticalSectionRawMutex, Vec<u8, RX_BUF_LEN>, 2>;
 /// Signaled by [`gatt_events_task`] when the connection drops, so
 /// [`BleReader`] can unblock a pending `read()` with an error instead of
 /// [`select`] externally cancelling `run_session` — which could otherwise
-/// drop it between `commands.send()` and `acks.receive()` and orphan the
-/// eventual ack for an unrelated later session to wrongly consume.
+/// drop it while its Command is in flight on the
+/// [`protocol::DisplayMailbox`] and orphan the eventual ack for an unrelated
+/// later session to wrongly consume.
 type Disconnected = Signal<CriticalSectionRawMutex, ()>;
 
 #[gatt_server]
@@ -199,8 +200,7 @@ impl Write for BleWriter<'_> {
 /// in-memory copy.
 pub async fn run<J: WifiJoin>(
     controller: BtController,
-    commands: &protocol::CommandChannel,
-    acks: &protocol::AckChannel,
+    display: &protocol::DisplayMailbox,
     mut wifi: J,
     initial_bond: Option<BondInformation>,
     window: &BondableWindow,
@@ -284,7 +284,7 @@ pub async fn run<J: WifiJoin>(
                     };
                     let writer = BleWriter { conn: &conn, reply };
                     let session_fut = protocol::run_session(
-                        reader, writer, commands, acks, &mut wifi, &mut bonds,
+                        reader, writer, display, &mut wifi, &mut bonds,
                     );
 
                     // `join`, not `select`: `session_fut` must run to its own

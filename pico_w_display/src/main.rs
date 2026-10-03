@@ -164,8 +164,7 @@ async fn main(spawner: Spawner) {
     let (mut usb_dev, mut sender, mut receiver) =
         usb::build(driver, &mut usb_buffers, &mut usb_state);
 
-    let commands = protocol::CommandChannel::new();
-    let acks = protocol::AckChannel::new();
+    let display = protocol::DisplayMailbox::new();
 
     let usb_fut = usb_dev.run();
 
@@ -181,8 +180,7 @@ async fn main(spawner: Spawner) {
             protocol::run_session(
                 &mut receiver,
                 &mut sender,
-                &commands,
-                &acks,
+                &display,
                 &mut wifi,
                 &mut bonds,
             )
@@ -194,8 +192,7 @@ async fn main(spawner: Spawner) {
     let ble_controller: bt::BtController = ExternalController::new(bt_device);
     let ble_fut = bt::run(
         ble_controller,
-        &commands,
-        &acks,
+        &display,
         wifi::SharedWifi(&wifi_mutex),
         initial_bond,
         &bondable_window,
@@ -212,7 +209,7 @@ async fn main(spawner: Spawner) {
         let mut ticker = Ticker::every(Duration::from_millis(100));
 
         loop {
-            match select(ticker.next(), commands.receive()).await {
+            match select(ticker.next(), display.receive()).await {
                 Either::First(()) => {
                     // Ticks only drive redraws while the clock is showing;
                     // manually-set text sits still until changed again.
@@ -252,7 +249,7 @@ async fn main(spawner: Spawner) {
                     render_digits(&mut grd, digits);
                     grd.update().await;
 
-                    acks.send(()).await;
+                    display.ack().await;
                 }
             }
         }

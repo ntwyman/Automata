@@ -20,6 +20,7 @@ use core::fmt::Write as _;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::mutex::Mutex;
 use embedded_io_async::{Read, Write};
 use heapless::String;
 use smart_leds::RGB8;
@@ -41,7 +42,7 @@ macro_rules! warn {
 
 /// What a transport needs to provide so [`run_session`] can dispatch `WIFI`
 /// without depending on any concrete Wi-Fi stack. Kept separate from
-/// [`Command`]/[`CommandChannel`] because joining a network is a direct,
+/// [`Command`]/[`DisplayMailbox`] because joining a network is a direct,
 /// awaited round-trip — there's no display to ack it.
 // Only implemented in this workspace (by `wifi::Wifi` and this module's own
 // test fake), so the usual reason for the `async_fn_in_trait` lint — an
@@ -85,11 +86,62 @@ pub const MAX_LINE_LEN: usize = 104;
 /// `reply` characteristic sizes its backing buffer off this bound.
 pub const MAX_REPLY_LEN: usize = 40;
 
-/// A single-slot mailbox from the protocol session to the display loop.
-pub type CommandChannel = Channel<CriticalSectionRawMutex, Command, 1>;
-/// A single-slot mailbox the display loop uses to acknowledge it applied a
-/// command, so the protocol session knows when it's safe to reply `OK`.
-pub type AckChannel = Channel<CriticalSectionRawMutex, (), 1>;
+/// The display loop's side of every Session: Sessions hand it [`Command`]s,
+/// and it acks each once applied so the Session knows when it's safe to
+/// reply `OK`. One `DisplayMailbox` is shared by every Session, whatever its
+/// Transport.
+///
+/// Acks are bare `()`, so nothing in an ack says whose Command it was for.
+/// What ties it to the right Session is `turn`: a Session holds it from
+/// sending its Command until receiving that Command's ack, so at most one
+/// Session ever has a Command in flight. Another Session wanting the display
+/// meanwhile just waits its turn.
+///
+/// Dropping a Session mid-[`DisplayMailbox::apply`] would release `turn`
+/// with an ack still owed, for the next Session to take as its own — so a
+/// Session must run to completion rather than being cancelled (see
+/// `bt.rs`'s `Disconnected`).
+pub struct DisplayMailbox {
+    commands: Channel<CriticalSectionRawMutex, Command, 1>,
+    acks: Channel<CriticalSectionRawMutex, (), 1>,
+    turn: Mutex<CriticalSectionRawMutex, ()>,
+}
+
+impl DisplayMailbox {
+    pub const fn new() -> Self {
+        DisplayMailbox {
+            commands: Channel::new(),
+            acks: Channel::new(),
+            turn: Mutex::new(()),
+        }
+    }
+
+    /// Session side: waits for this Session's turn, then hands `command` to
+    /// the display loop and returns once the display has applied it.
+    async fn apply(&self, command: Command) {
+        let _turn = self.turn.lock().await;
+        self.commands.send(command).await;
+        self.acks.receive().await;
+    }
+
+    /// Display loop side: the next Command to apply. Follow each with
+    /// [`DisplayMailbox::ack`] once it's applied.
+    pub async fn receive(&self) -> Command {
+        self.commands.receive().await
+    }
+
+    /// Display loop side: the last Command from [`DisplayMailbox::receive`] has
+    /// been applied.
+    pub async fn ack(&self) {
+        self.acks.send(()).await;
+    }
+}
+
+impl Default for DisplayMailbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// A parsed, fully-validated client command. By the time one of these exists,
 /// it is safe to apply directly to the display with no further checks.
@@ -278,15 +330,14 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 }
 
 /// Runs one client session to completion: reads lines, dispatches parsed
-/// commands to the display loop over `commands`, waits for `acks` to confirm
-/// the display applied it, and writes back `OK`/`ERR`. Returns once the
+/// commands to the display loop over `display`, waits for the display to
+/// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
 pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
     mut reader: R,
     mut writer: W,
-    commands: &CommandChannel,
-    acks: &AckChannel,
+    display: &DisplayMailbox,
     wifi: &mut J,
     bond: &mut U,
 ) {
@@ -320,8 +371,7 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear>(
                 }
                 match parse_line(&line) {
                     Ok(ParsedLine::Display(command)) => {
-                        commands.send(command).await;
-                        acks.receive().await;
+                        display.apply(command).await;
                         let _ = reply.push_str("OK\n");
                     }
                     Ok(ParsedLine::Wifi(ssid, password)) => {
@@ -451,7 +501,7 @@ mod tests {
     }
 
     /// Feeds raw `input` bytes through [`run_session`] and returns everything
-    /// it wrote back. A fake display task drains `commands` and immediately
+    /// it wrote back. A fake display task drains `display` and immediately
     /// acks, standing in for `main.rs`'s real display loop; `select` (rather
     /// than `join`) is used since that fake loop never terminates on its own
     /// — only `run_session` reaching a clean close ends the pair.
@@ -468,8 +518,7 @@ mod tests {
         let writer = FakeWriter {
             written: &mut written,
         };
-        let commands = CommandChannel::new();
-        let acks = AckChannel::new();
+        let display = DisplayMailbox::new();
         let mut wifi = FakeWifi {
             outcome: wifi_outcome,
         };
@@ -477,11 +526,11 @@ mod tests {
             outcome: bond_outcome,
         };
 
-        let session = run_session(reader, writer, &commands, &acks, &mut wifi, &mut bond);
+        let session = run_session(reader, writer, &display, &mut wifi, &mut bond);
         let fake_display = async {
             loop {
-                commands.receive().await;
-                acks.send(()).await;
+                display.receive().await;
+                display.ack().await;
             }
         };
 
@@ -675,5 +724,261 @@ mod tests {
     fn line_too_long() {
         let long_line = "TEXT ".to_string() + &"9".repeat(200) + "\n";
         assert_eq!(run(&long_line, ok_wifi(), ok_bond()), "ERR line too long\n");
+    }
+
+    // Concurrent Sessions: two `run_session`s and a fake display loop that
+    // takes several polls to draw, all joined in one future the way
+    // `main.rs` joins the USB and BLE Sessions with the real display loop.
+
+    const USB: usize = 0;
+    const BLE: usize = 1;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Event {
+        /// The display finished drawing this `TEXT` value.
+        Shown(std::string::String),
+        /// This Session wrote an `OK` reply.
+        Replied(usize),
+        /// This Session's `run_session` returned.
+        Ended(usize),
+    }
+
+    type Log = core::cell::RefCell<std::vec::Vec<Event>>;
+
+    /// One Session's client: which `TEXT` values it sends, how many polls it
+    /// waits before its first byte, and whether its Transport fails on
+    /// write.
+    struct Client {
+        texts: std::vec::Vec<std::string::String>,
+        start_delay: usize,
+        fail_writes: bool,
+    }
+
+    impl Client {
+        /// `count` distinct `TEXT` values, unique to `session`.
+        fn new(session: usize, count: usize, start_delay: usize) -> Self {
+            Client {
+                texts: (0..count).map(|k| std::format!("{session}{k}:00")).collect(),
+                start_delay,
+                fail_writes: false,
+            }
+        }
+    }
+
+    /// Like [`FakeReader`], but yields `pending` polls before serving the
+    /// next byte, so a client can arrive late, and pauses one poll after
+    /// each line as any real client does. That pause matters: the turn lock
+    /// isn't FIFO, so a client sending with no gap at all could keep
+    /// re-taking it before the other Session is polled.
+    struct SlowReader {
+        bytes: std::vec::Vec<u8>,
+        pos: usize,
+        pending: usize,
+    }
+
+    impl embedded_io_async::ErrorType for SlowReader {
+        type Error = Infallible;
+    }
+
+    impl Read for SlowReader {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Infallible> {
+            while self.pending > 0 {
+                self.pending -= 1;
+                embassy_futures::yield_now().await;
+            }
+            if self.pos >= self.bytes.len() {
+                return Ok(0);
+            }
+            buf[0] = self.bytes[self.pos];
+            self.pos += 1;
+            if buf[0] == b'\n' {
+                self.pending = 1;
+            }
+            Ok(1)
+        }
+    }
+
+    /// Logs each `OK` its Session writes, or fails every write.
+    struct LoggingWriter<'a> {
+        session: usize,
+        log: &'a Log,
+        fail: bool,
+    }
+
+    impl embedded_io_async::ErrorType for LoggingWriter<'_> {
+        type Error = embedded_io_async::ErrorKind;
+    }
+
+    impl Write for LoggingWriter<'_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if self.fail {
+                return Err(embedded_io_async::ErrorKind::BrokenPipe);
+            }
+            assert_eq!(buf, b"OK\n", "display Commands only ever reply OK");
+            self.log.borrow_mut().push(Event::Replied(self.session));
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Polls `fut` to completion, but only when something woke it: a future
+    /// left pending with no wake outstanding is hung and fails the test,
+    /// rather than blocking forever like `pollster` would.
+    fn block_on_or_hang<F: core::future::Future>(fut: F) -> F::Output {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct Woken(AtomicBool);
+        impl Wake for Woken {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let woken = Arc::new(Woken(AtomicBool::new(true)));
+        let waker = Waker::from(woken.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = core::pin::pin!(fut);
+        for _ in 0..1_000_000 {
+            assert!(woken.0.swap(false, Ordering::SeqCst), "hung: pending with no wake");
+            if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+                return out;
+            }
+        }
+        panic!("hung: poll budget exhausted");
+    }
+
+    /// Runs the USB and BLE clients' Sessions (USB polled first, as in
+    /// `main.rs`) against a fake display loop that yields `draw_polls` times
+    /// per Command, until both Sessions end. Returns everything that
+    /// happened, in order.
+    fn run_pair(usb: Client, ble: Client, draw_polls: usize) -> std::vec::Vec<Event> {
+        let log = Log::default();
+        let display = DisplayMailbox::new();
+
+        let session = |id: usize, client: Client| {
+            let (log, display) = (&log, &display);
+            async move {
+                let mut bytes = std::vec::Vec::new();
+                for text in &client.texts {
+                    bytes.extend_from_slice(std::format!("TEXT {text}\n").as_bytes());
+                }
+                let reader = SlowReader {
+                    bytes,
+                    pos: 0,
+                    pending: client.start_delay,
+                };
+                let writer = LoggingWriter {
+                    session: id,
+                    log,
+                    fail: client.fail_writes,
+                };
+                let mut wifi = FakeWifi { outcome: ok_wifi() };
+                let mut bond = FakeBondClear { outcome: ok_bond() };
+                run_session(reader, writer, display, &mut wifi, &mut bond).await;
+                log.borrow_mut().push(Event::Ended(id));
+            }
+        };
+
+        let fake_display = async {
+            loop {
+                let Command::Text(text) = display.receive().await else {
+                    panic!("only TEXT is sent here");
+                };
+                for _ in 0..draw_polls {
+                    embassy_futures::yield_now().await;
+                }
+                log.borrow_mut().push(Event::Shown(text.as_str().into()));
+                display.ack().await;
+            }
+        };
+
+        let sessions = embassy_futures::join::join(session(USB, usb), session(BLE, ble));
+        block_on_or_hang(select(sessions, fake_display));
+        log.into_inner()
+    }
+
+    /// Where `event` appears in `log`.
+    fn positions(log: &[Event], event: &Event) -> std::vec::Vec<usize> {
+        log.iter()
+            .enumerate()
+            .filter(|(_, e)| *e == event)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Asserts each of `session`'s `texts` got exactly one `OK`, and that
+    /// the k-th `OK` came after the display showed the k-th text.
+    fn assert_replies_follow_own_commands(log: &[Event], session: usize, texts: &[std::string::String]) {
+        let replies = positions(log, &Event::Replied(session));
+        assert_eq!(replies.len(), texts.len(), "session {session}: one reply per Command\n{log:#?}");
+        for (text, &reply_at) in texts.iter().zip(&replies) {
+            let shown = positions(log, &Event::Shown(text.clone()));
+            assert_eq!(shown.len(), 1, "{text} shown exactly once\n{log:#?}");
+            assert!(
+                shown[0] < reply_at,
+                "session {session} replied OK before {text} was shown\n{log:#?}"
+            );
+        }
+    }
+
+    fn assert_pair_ok(usb: Client, ble: Client, draw_polls: usize) {
+        let (usb_texts, ble_texts) = (usb.texts.clone(), ble.texts.clone());
+        let log = run_pair(usb, ble, draw_polls);
+        assert_replies_follow_own_commands(&log, USB, &usb_texts);
+        assert_replies_follow_own_commands(&log, BLE, &ble_texts);
+    }
+
+    #[test]
+    fn concurrent_usb_first_then_ble() {
+        assert_pair_ok(Client::new(USB, 1, 0), Client::new(BLE, 1, 1), 3);
+    }
+
+    #[test]
+    fn concurrent_ble_first_then_usb_mid_frame() {
+        assert_pair_ok(Client::new(USB, 1, 1), Client::new(BLE, 1, 0), 3);
+    }
+
+    #[test]
+    fn concurrent_sweep_start_delays() {
+        for draw_polls in [0, 1, 3] {
+            for usb_delay in 0..8 {
+                for ble_delay in 0..8 {
+                    assert_pair_ok(
+                        Client::new(USB, 3, usb_delay),
+                        Client::new(BLE, 3, ble_delay),
+                        draw_polls,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_transport_waiting_for_turn_ends_and_other_session_continues() {
+        let usb = Client::new(USB, 5, 0);
+        let usb_texts = usb.texts.clone();
+        let mut ble = Client::new(BLE, 3, 1);
+        ble.fail_writes = true;
+
+        let log = run_pair(usb, ble, 3);
+
+        // BLE's first Command arrives while USB's is being drawn: it may wait
+        // out that frame and draw its own, but no more.
+        let ended_at = log
+            .iter()
+            .position(|e| *e == Event::Ended(BLE))
+            .expect("BLE session ended");
+        let frames_before_end = log[..ended_at]
+            .iter()
+            .filter(|e| matches!(e, Event::Shown(_)))
+            .count();
+        assert!(frames_before_end <= 2, "BLE outlived its turn\n{log:#?}");
+        assert!(!log.contains(&Event::Replied(BLE)));
+        assert_replies_follow_own_commands(&log, USB, &usb_texts);
     }
 }
