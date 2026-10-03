@@ -4,10 +4,10 @@
 //! encrypt but [`bt::run`](crate::bt::run) leaves them non-bondable, so
 //! pairing produces only a transient link.
 //!
-//! GP22 needs no software debounce: ticket #4's hardware validation (see
-//! `bin/button_check.rs`) found it a clean, active-low GPIO with no bounce
-//! artifacts on real presses, so a plain falling-edge wait is all that's
-//! needed here.
+//! GP22 needs no software debounce: ticket #4's hardware validation (the
+//! `button_check` binary added in b3103eb, since removed) found it a clean,
+//! active-low GPIO with no bounce artifacts on real presses, so a plain
+//! falling-edge wait is all that's needed here.
 
 use core::cell::Cell;
 
