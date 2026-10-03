@@ -26,3 +26,18 @@ _Avoid_: Bonding (use Bond for the noun, Pairing for the verb/event)
 **Bondable Window**:
 The timed period (default 45s) after a GP22 button press during which a new Pairing is allowed to produce a persisted Bond. Outside the window, connections are still encryptable but not bondable.
 _Avoid_: Pairing mode, admission window
+
+**Wall Clock**:
+The local time of day shown on the grid as 24-hour `HH:MM` (colon blinking once a second), derived from the last Sync's UTC plus the TZ Rule. What `CLOCK` displays.
+_Avoid_: Elapsed time, uptime (the old boot-relative clock this replaced)
+
+**Sync**:
+One successful SNTP exchange that sets the device's UTC offset. Attempted once the Wi-Fi link has a DHCP lease, then every 6h; between Syncs the Wall Clock free-runs on the last one.
+_Avoid_: NTP update, refresh
+
+**Unsynced**:
+The state before the first Sync since boot, when there's no UTC to show: the grid shows `--:--` with a solid colon, and `TIME` replies `ERR not synced`.
+
+**TZ Rule**:
+The persisted POSIX TZ string (e.g. `PST8PDT,M3.2.0,M11.1.0`) that converts UTC to local time, including DST transitions. Set by `TZ`; defaults to UTC when never set. See `docs/adr/0003-posix-tz-rule-on-device.md`.
+_Avoid_: Timezone (ambiguous with IANA names like `America/Los_Angeles`, which the device never sees), offset
