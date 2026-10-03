@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "./pico_w_display"
+		},
+		{
+			"path": "pico_w_display_app"
 		}
 	],
 	"settings": {}
