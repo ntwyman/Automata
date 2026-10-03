@@ -1,7 +1,7 @@
 use crate::fonts;
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812};
-use smart_leds::{RGB8, SmartLedsWriteAsync};
+use smart_leds::RGB8;
 
 #[allow(dead_code)] // We only use one of these right now
 pub enum GridOrigin {
@@ -94,9 +94,16 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
             }
         }
     }
+    /// Pushes the frame out in one DMA transfer (`write_slice`). Not the
+    /// iterator-based `SmartLedsWriteAsync::write`: that DMAs one LED at a
+    /// time and needs the executor to re-poll between each, so whenever
+    /// another task (BLE connection events, GATT writes, cyw43) holds the
+    /// CPU for longer than the PIO FIFO's few-LED slack, the data line goes
+    /// idle mid-frame, the strip latches early, and the rest of the frame
+    /// lands shifted.
     pub async fn update(&mut self) {
         if self.brightness == 255 {
-            self.pio.write(self.data.iter().copied()).await;
+            self.pio.write_slice(&self.data).await;
         } else {
             let mut scaled = [RGB8::default(); SIZE];
             for (dst, src) in scaled.iter_mut().zip(smart_leds::brightness(
@@ -105,7 +112,7 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
             )) {
                 *dst = src;
             }
-            self.pio.write(scaled.iter().copied()).await;
+            self.pio.write_slice(&scaled).await;
         }
     }
 
