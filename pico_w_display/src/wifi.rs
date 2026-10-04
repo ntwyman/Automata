@@ -178,7 +178,14 @@ pub async fn supervise(
     // boot, where there's no drop to wait out.
     let mut back_off = false;
     loop {
-        if wifi.lock().await.saved.is_none() {
+        let saved = {
+            let wifi = wifi.lock().await;
+            // Anything signalled before this lock is already visible under
+            // it; left pending, it would cut the next wait short.
+            wake.reset();
+            wifi.saved.is_some()
+        };
+        if !saved {
             (failures, back_off) = (0, true);
             wake.wait().await;
             continue;
