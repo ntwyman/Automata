@@ -3,9 +3,17 @@ MEMORY {
      * The RP2350 has either external or internal flash.
      *
      * 2 MiB is a safe default here, although a Pico 2 has 4 MiB. The last
-     * 16 KiB of that is carved out below as BOND_STORAGE.
+     * 32 KiB of that is carved out below as SETTINGS_STORAGE then
+     * BOND_STORAGE.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K - 16K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K - 32K
+    /*
+     * Reserved for `settings.rs`'s keyed `sequential-storage` map: the TZ
+     * Rule (ticket #13 / ADR-0003), and room for later settings such as
+     * saved Wi-Fi credentials. A separate region from BOND_STORAGE so that
+     * one's layout (and any Bond already stored in it) is left untouched.
+     */
+    SETTINGS_STORAGE : ORIGIN = ORIGIN(FLASH) + LENGTH(FLASH), LENGTH = 16K
     /*
      * Reserved for `bond_store.rs`'s `sequential-storage` map: the single
      * persisted BLE Bond record (ticket #6 / ADR-0002), wear-levelled
@@ -13,7 +21,7 @@ MEMORY {
      * its own linker region (rather than a hardcoded offset into FLASH)
      * means the linker itself guarantees code can never grow into it.
      */
-    BOND_STORAGE : ORIGIN = ORIGIN(FLASH) + LENGTH(FLASH), LENGTH = 16K
+    BOND_STORAGE : ORIGIN = ORIGIN(SETTINGS_STORAGE) + LENGTH(SETTINGS_STORAGE), LENGTH = 16K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -84,7 +92,9 @@ PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
 
 /* Offsets (not absolute addresses) into flash — what `embassy_rp::flash::
- * Flash`'s `offset` parameters expect, and what `bond_store.rs` uses to
- * size its `sequential-storage` map. */
+ * Flash`'s `offset` parameters expect, and what `bond_store.rs` and
+ * `settings.rs` use to size their `sequential-storage` maps. */
+__settings_storage_start = ORIGIN(SETTINGS_STORAGE) - ORIGIN(FLASH);
+__settings_storage_end = ORIGIN(SETTINGS_STORAGE) + LENGTH(SETTINGS_STORAGE) - ORIGIN(FLASH);
 __bond_storage_start = ORIGIN(BOND_STORAGE) - ORIGIN(FLASH);
 __bond_storage_end = ORIGIN(BOND_STORAGE) + LENGTH(BOND_STORAGE) - ORIGIN(FLASH);

@@ -1,7 +1,7 @@
-//! Displays the NTP-synced Wall Clock (UTC, 24-hour `HH:MM`) on a 17x17
-//! WS2812 LED grid, or whatever a client connected over USB serial or BLE
-//! asks for instead. See `protocol.rs` for the command set and `ntp.rs` for
-//! Syncing.
+//! Displays the NTP-synced Wall Clock (24-hour `HH:MM` local time, per the
+//! persisted TZ Rule) on a 17x17 WS2812 LED grid, or whatever a client
+//! connected over USB serial or BLE asks for instead. See `protocol.rs` for
+//! the command set, `ntp.rs` for Syncing and `settings.rs` for the TZ Rule.
 
 #![no_std]
 #![no_main]
@@ -10,7 +10,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join5;
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Input, Pull};
@@ -22,6 +22,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
+use pico_w_display::tz::TzRule;
 use pico_w_display::{protocol, wall_clock};
 use smart_leds::colors;
 use trouble_host::prelude::ExternalController;
@@ -29,10 +30,12 @@ use {defmt_rtt as _, panic_probe as _};
 
 mod bond_store;
 mod bt;
+mod flash;
 mod fonts;
 mod grid;
 mod ntp;
 mod pairing_window;
+mod settings;
 mod usb;
 mod wifi;
 
@@ -104,15 +107,21 @@ fn render(grid: &mut DisplayGrid, frame: Frame) {
 }
 
 /// What `mode` shows at `now` given the last Sync (`boot_utc_ms`, see
-/// `ntp::WALL_CLOCK`), and when that next changes on its own — `None` if
-/// only a Command or a Sync can change it.
-fn frame_at(mode: &DisplayMode, boot_utc_ms: Option<u64>, now: Instant) -> (Frame, Option<Instant>) {
+/// `ntp::WALL_CLOCK`) and the TZ Rule, and when that next changes on its own
+/// — `None` if only a Command, a Sync or a `TZ` can change it.
+fn frame_at(
+    mode: &DisplayMode,
+    boot_utc_ms: Option<u64>,
+    tz: &TzRule,
+    now: Instant,
+) -> (Frame, Option<Instant>) {
     match (mode, boot_utc_ms) {
         (DisplayMode::Text(digits), _) => (Frame::digits(*digits, true), None),
         (DisplayMode::Clock, None) => (UNSYNCED, None),
         (DisplayMode::Clock, Some(boot_utc_ms)) => {
             let utc_ms = ntp::utc_ms(boot_utc_ms, now);
-            let face = wall_clock::face(utc_ms);
+            let face = wall_clock::face(tz.local_ms(utc_ms));
+            // DST transitions land on whole seconds, so on a colon toggle too.
             let next = now + Duration::from_millis(wall_clock::ms_until_change(utc_ms));
             (Frame::digits(face.digits, face.colon), Some(next))
         }
@@ -163,8 +172,17 @@ async fn main(spawner: Spawner) {
     // transfer. Running these two concurrently (an earlier version of this
     // code did, to shave boot time) reproduced SPI corruption on real
     // hardware — not worth it for a one-time, sub-millisecond flash scan.
-    let mut bond_store = bond_store::BondStore::new(p.FLASH, p.DMA_CH3);
+    let shared_flash = flash::init(p.FLASH, p.DMA_CH3);
+    let mut bond_store = bond_store::BondStore::new(shared_flash);
     let initial_bond = bond_store.load().await;
+    // Same reasoning as the Bond load: sequential, after Wi-Fi bring-up.
+    let mut settings_store = settings::SettingsStore::new(shared_flash);
+    if let Some(rule) = settings_store.load_tz().await {
+        info!("restoring tz rule: {}", rule.as_str());
+        settings::TZ_RULE.sender().send(rule);
+    }
+    let settings_mutex: Mutex<CriticalSectionRawMutex, settings::SettingsStore> =
+        Mutex::new(settings_store);
 
     // `initial_bond` (loaded above) lets a previously-bonded phone reconnect
     // on `bt::run`'s very first advertisement — even right after this
@@ -207,6 +225,9 @@ async fn main(spawner: Spawner) {
             store: &bond_store_mutex,
             evict: &unpair_signal,
         };
+        let mut tz = settings::TzSetting {
+            store: &settings_mutex,
+        };
         loop {
             receiver.wait_connection().await;
             info!("serial client connected");
@@ -217,6 +238,7 @@ async fn main(spawner: Spawner) {
                 &mut wifi,
                 &mut bonds,
                 &ntp::Clock,
+                &mut tz,
             )
             .await;
             info!("serial client disconnected");
@@ -229,6 +251,9 @@ async fn main(spawner: Spawner) {
         &display,
         wifi::SharedWifi(&wifi_mutex),
         &ntp::Clock,
+        settings::TzSetting {
+            store: &settings_mutex,
+        },
         initial_bond,
         &bondable_window,
         bond_store::Bonds {
@@ -239,12 +264,14 @@ async fn main(spawner: Spawner) {
 
     let display_fut = async {
         let mut syncs = unwrap!(ntp::WALL_CLOCK.receiver());
+        let mut tz_changes = unwrap!(settings::TZ_RULE.receiver());
         let mut boot_utc_ms: Option<u64> = None;
+        let mut tz = settings::current_tz();
         let mut mode = DisplayMode::Clock;
         let mut shown: Option<Frame> = None;
 
         loop {
-            let (frame, next_change) = frame_at(&mode, boot_utc_ms, Instant::now());
+            let (frame, next_change) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
             if shown != Some(frame) {
                 render(&mut grd, frame);
                 grd.update().await;
@@ -257,9 +284,9 @@ async fn main(spawner: Spawner) {
                     None => core::future::pending().await,
                 }
             };
-            match select3(tick, display.receive(), syncs.changed()).await {
-                Either3::First(()) => {}
-                Either3::Second(command) => {
+            match select4(tick, display.receive(), syncs.changed(), tz_changes.changed()).await {
+                Either4::First(()) => {}
+                Either4::Second(command) => {
                     match command {
                         protocol::Command::Clock => mode = DisplayMode::Clock,
                         protocol::Command::Text(s) => mode = DisplayMode::Text(text_digits(&s)),
@@ -268,14 +295,15 @@ async fn main(spawner: Spawner) {
                     }
                     // Always redrawn, even if the frame is unchanged (e.g.
                     // `COLOR`), and before the ack so `OK` means it's shown.
-                    let (frame, _) = frame_at(&mode, boot_utc_ms, Instant::now());
+                    let (frame, _) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
                     render(&mut grd, frame);
                     grd.update().await;
                     shown = Some(frame);
 
                     display.ack().await;
                 }
-                Either3::Third(synced) => boot_utc_ms = Some(synced),
+                Either4::Third(synced) => boot_utc_ms = Some(synced),
+                Either4::Fourth(rule) => tz = rule,
             }
         }
     };

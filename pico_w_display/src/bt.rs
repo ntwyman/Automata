@@ -23,7 +23,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
-use pico_w_display::protocol::{self, WallClock, WifiJoin};
+use pico_w_display::protocol::{self, TzStore, WallClock, WifiJoin};
 use trouble_host::prelude::*;
 
 use crate::bond_store::{Bonds, BondStore};
@@ -197,12 +197,16 @@ impl Write for BleWriter<'_> {
 /// right after a power cycle. `window` gates whether new connections may
 /// bond at all; `bonds` is where a fresh in-window Bond gets persisted, and
 /// where `UNPAIR` (over either transport) signals this loop to evict its
-/// in-memory copy. `clock` answers `TIME`.
-pub async fn run<J: WifiJoin, C: WallClock>(
+/// in-memory copy. `clock` answers `TIME`, and `tz` stores `TZ`.
+// One parameter per thing a Session or the Bond lifecycle needs, each
+// already its own small handle; bundling them would only move the count.
+#[allow(clippy::too_many_arguments)]
+pub async fn run<J: WifiJoin, C: WallClock, Z: TzStore>(
     controller: BtController,
     display: &protocol::DisplayMailbox,
     mut wifi: J,
     clock: &C,
+    mut tz: Z,
     initial_bond: Option<BondInformation>,
     window: &BondableWindow,
     mut bonds: Bonds<'_>,
@@ -285,7 +289,7 @@ pub async fn run<J: WifiJoin, C: WallClock>(
                     };
                     let writer = BleWriter { conn: &conn, reply };
                     let session_fut = protocol::run_session(
-                        reader, writer, display, &mut wifi, &mut bonds, clock,
+                        reader, writer, display, &mut wifi, &mut bonds, clock, &mut tz,
                     );
 
                     // `join`, not `select`: `session_fut` must run to its own

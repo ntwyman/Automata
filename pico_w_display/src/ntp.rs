@@ -17,6 +17,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use pico_w_display::protocol::WallClock;
+use pico_w_display::tz::TzRule;
 use pico_w_display::{sntp, wall_clock};
 
 const SERVER: &str = "pool.ntp.org";
@@ -44,7 +45,7 @@ pub fn utc_ms(boot_utc_ms: u64, now: Instant) -> u64 {
     boot_utc_ms + now.as_millis()
 }
 
-/// [`WallClock`] over [`WALL_CLOCK`], for `TIME`.
+/// [`WallClock`] over [`WALL_CLOCK`] and `settings::TZ_RULE`, for `TIME`.
 pub struct Clock;
 
 impl WallClock for Clock {
@@ -52,6 +53,10 @@ impl WallClock for Clock {
         WALL_CLOCK
             .try_get()
             .map(|boot_utc_ms| utc_ms(boot_utc_ms, Instant::now()) / 1000)
+    }
+
+    fn tz_rule(&self) -> TzRule {
+        crate::settings::current_tz()
     }
 }
 

@@ -1,7 +1,7 @@
 //! Pure Wall Clock arithmetic on Unix time: what the grid shows for a given
-//! UTC instant ([`face`]), when that next changes ([`ms_until_change`]), the
+//! local instant ([`face`]), when that next changes ([`ms_until_change`]), the
 //! `TIME` reply's timestamp ([`iso8601`]), and the earliest time a Sync may
-//! report ([`year_start`]). UTC only — the TZ Rule isn't applied yet.
+//! report ([`year_start`]). Shifting UTC to local time is `tz`'s job.
 
 use core::fmt::Write as _;
 
@@ -20,10 +20,12 @@ pub struct Face {
     pub colon: bool,
 }
 
-/// The 24-hour `HH:MM` face at `utc_ms` (Unix milliseconds). The colon is lit
-/// for the first half of each UTC second and dark for the second half.
-pub fn face(utc_ms: u64) -> Face {
-    let secs_of_day = (utc_ms / 1000) % SECS_PER_DAY;
+/// The 24-hour `HH:MM` face at `local_ms` (Unix milliseconds shifted to local
+/// time by [`crate::tz::TzRule::local_ms`]). The colon is lit for the first
+/// half of each second and dark for the second half — the same phase as
+/// UTC's, since TZ Rule offsets are whole seconds.
+pub fn face(local_ms: u64) -> Face {
+    let secs_of_day = (local_ms / 1000) % SECS_PER_DAY;
     let hh = secs_of_day / 3600;
     let mm = secs_of_day / 60 % 60;
     Face {
@@ -33,7 +35,7 @@ pub fn face(utc_ms: u64) -> Face {
             (mm / 10) as u8,
             (mm % 10) as u8,
         ],
-        colon: utc_ms % 1000 < BLINK_MS,
+        colon: local_ms % 1000 < BLINK_MS,
     }
 }
 
@@ -70,7 +72,7 @@ pub fn year_start(unix_secs: u64) -> u64 {
 /// Days since 1970-01-01 → (year, month 1-12, day 1-31), proleptic
 /// Gregorian. Howard Hinnant's `civil_from_days`, restricted to dates on or
 /// after the Unix epoch.
-fn civil_from_days(days: u64) -> (u64, u64, u64) {
+pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
     let era = z / 146_097;
     let doe = z % 146_097;
@@ -84,7 +86,7 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 }
 
 /// Inverse of [`civil_from_days`], for years from 1970.
-fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
+pub(crate) fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y / 400;
     let yoe = y % 400;

@@ -12,9 +12,6 @@
 //! rotates the underlying sector on each write so no single sector takes all
 //! the wear.
 
-use embassy_rp::Peri;
-use embassy_rp::flash::{Async, Flash};
-use embassy_rp::peripherals::{DMA_CH3, FLASH};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
@@ -23,13 +20,7 @@ use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
 use trouble_host::prelude::BondInformation;
 
-use crate::Irqs;
-
-/// Matches the physical flash size `memory.x` assumes (a Pico 2 W has at
-/// least this much internal flash) — independent of how much of it the
-/// linker hands to code vs. `BOND_STORAGE`; see `embassy-rp`'s own flash
-/// examples, which size their `Flash` the same way.
-const FLASH_TOTAL_SIZE: usize = 2 * 1024 * 1024;
+use crate::flash::{self, FlashHandle, SharedFlash};
 
 /// Headroom for one `postcard`-serialized [`StoredBond`] plus
 /// `sequential-storage`'s own item framing (the key itself, `()`, serializes
@@ -48,8 +39,7 @@ struct StoredBond(BondInformation);
 
 impl PostcardValue<'_> for StoredBond {}
 
-type BondFlash = Flash<'static, FLASH, Async, FLASH_TOTAL_SIZE>;
-type BondMap = MapStorage<(), BondFlash, Cache<Uncached, Uncached, Uncached, ()>>;
+type BondMap = MapStorage<(), FlashHandle, Cache<Uncached, Uncached, Uncached, ()>>;
 
 /// Owns the flash region reserved for the Bond record.
 pub struct BondStore {
@@ -58,11 +48,9 @@ pub struct BondStore {
 }
 
 impl BondStore {
-    /// Takes the `FLASH` peripheral and a spare DMA channel (`DMA_CH3` —
-    /// `DMA_CH0`/`1`/`2` are already spoken for by the WS2812 output and the
-    /// Wi-Fi/BT SPI link; see `wifi.rs`'s module docs).
-    pub fn new(flash: Peri<'static, FLASH>, dma: Peri<'static, DMA_CH3>) -> Self {
-        let flash = Flash::new(flash, dma, Irqs);
+    /// Takes a handle onto the flash `settings.rs` also stores in.
+    pub fn new(flash: &'static SharedFlash) -> Self {
+        let flash = flash::handle(flash);
 
         // `memory.x`-provided symbols giving the `BOND_STORAGE` region's
         // offsets (not absolute addresses) — the form `embassy_rp::flash::

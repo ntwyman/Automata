@@ -79,6 +79,9 @@ embassy-net = { version = "0.9.1", features = [
     "dns",
 ] }
 static_cell = "2.1.1"
+# `flash::Partition`, so `bond_store.rs` and `settings.rs` can each own a
+# `sequential-storage` map over the one `embassy_rp::flash::Flash`.
+embassy-embedded-hal = "0.6.0"
 
 # BLE GATT transport. `default-packet-pool-mtu-128` matches the proven
 # `rp-pico-2-w` reference config (rather than the 251-byte default) — plenty
@@ -163,3 +166,6 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51
 embassy-net-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 embassy-net-driver-channel = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+# Already pulled in (from this commit) by `embassy-rp`; patched so `main.rs`'s
+# direct use resolves to the same crate rather than a crates.io copy.
+embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }

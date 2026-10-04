@@ -25,6 +25,8 @@ use embedded_io_async::{Read, Write};
 use heapless::String;
 use smart_leds::RGB8;
 
+use crate::tz::{MAX_TZ_LEN, TzRule};
+
 // Host tests can't link defmt's global logger (that's `defmt-rtt`, an
 // on-device crate), so these become no-ops under `cfg(test)`. On-device
 // behavior is unchanged: `info!`/`warn!` still resolve to `defmt::info!`/
@@ -78,6 +80,20 @@ pub trait BondClear {
 pub trait WallClock {
     /// The current UTC time as Unix seconds, or `None` while Unsynced.
     fn utc_now(&self) -> Option<u64>;
+
+    /// The TZ Rule in force.
+    fn tz_rule(&self) -> TzRule;
+}
+
+/// What a transport needs to provide so [`run_session`] can dispatch `TZ`.
+/// Not a [`Command`]: the TZ Rule is persisted and also read by `TIME`, so
+/// it lives outside the display loop, which picks up changes itself.
+#[allow(async_fn_in_trait)]
+pub trait TzStore {
+    /// Persists `rule` and puts it in force, or returns a reason string
+    /// that's safe to send straight back to a client as `ERR <reason>`, with
+    /// the previous rule still in force.
+    async fn set(&mut self, rule: TzRule) -> Result<(), &'static str>;
 }
 
 /// Longest line we'll accept; comfortably longer than any real command (the
@@ -89,11 +105,11 @@ pub trait WallClock {
 /// can size its backing buffer off the same bound instead of duplicating it.
 pub const MAX_LINE_LEN: usize = 104;
 
-/// Longest reply line `run_session` ever writes (`OK <ISO-8601 UTC>\n`,
-/// 24 bytes, is the longest case). `pub` for the same reason as
+/// Longest reply line `run_session` ever writes: `TIME`'s
+/// `OK <ISO-8601 UTC> <TZ Rule>\n`. `pub` for the same reason as
 /// [`MAX_LINE_LEN`]: the BLE `reply` characteristic sizes its backing buffer
 /// off this bound.
-pub const MAX_REPLY_LEN: usize = 40;
+pub const MAX_REPLY_LEN: usize = "OK ".len() + "2026-10-03T12:34:56Z ".len() + MAX_TZ_LEN + 1;
 
 /// The display loop's side of every Session: Sessions hand it [`Command`]s,
 /// and it acks each once applied so the Session knows when it's safe to
@@ -175,8 +191,11 @@ enum ParsedLine {
     /// Clear the persisted Bond, handled directly in [`run_session`] like
     /// `Wifi` since it has nothing to do with the grid.
     Unpair,
-    /// Report the Wall Clock's UTC, handled directly in [`run_session`].
+    /// Report the Wall Clock's UTC and TZ Rule, handled directly in
+    /// [`run_session`].
     Time,
+    /// Persist and apply a TZ Rule, handled directly in [`run_session`].
+    Tz(TzRule),
 }
 
 #[derive(defmt::Format)]
@@ -184,6 +203,7 @@ enum ProtocolError {
     UnknownCommand,
     BadArgs,
     UnsupportedChar,
+    BadTz,
 }
 
 impl ProtocolError {
@@ -192,6 +212,7 @@ impl ProtocolError {
             ProtocolError::UnknownCommand => "unknown command",
             ProtocolError::BadArgs => "bad args",
             ProtocolError::UnsupportedChar => "unsupported char",
+            ProtocolError::BadTz => "bad tz",
         }
     }
 }
@@ -219,6 +240,8 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         Ok(ParsedLine::Unpair)
     } else if cmd.eq_ignore_ascii_case("TIME") {
         Ok(ParsedLine::Time)
+    } else if cmd.eq_ignore_ascii_case("TZ") {
+        parse_tz(rest)
     } else {
         Err(ProtocolError::UnknownCommand)
     }
@@ -288,6 +311,14 @@ fn parse_wifi(s: &str) -> Result<ParsedLine, ProtocolError> {
     Ok(ParsedLine::Wifi(ssid_buf, password_buf))
 }
 
+/// `<posix>`: a TZ Rule in the subset [`TzRule::parse`] accepts.
+fn parse_tz(s: &str) -> Result<ParsedLine, ProtocolError> {
+    if s.is_empty() {
+        return Err(ProtocolError::BadArgs);
+    }
+    TzRule::parse(s).map(ParsedLine::Tz).ok_or(ProtocolError::BadTz)
+}
+
 /// Outcome of reading one line from the transport.
 enum Line {
     /// A complete line, ready to parse.
@@ -347,13 +378,14 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallClock>(
+pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallClock, Z: TzStore>(
     mut reader: R,
     mut writer: W,
     display: &DisplayMailbox,
     wifi: &mut J,
     bond: &mut U,
     clock: &C,
+    tz: &mut Z,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -408,10 +440,23 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallCl
                     },
                     Ok(ParsedLine::Time) => match clock.utc_now() {
                         Some(utc) => {
-                            let _ = writeln!(reply, "OK {}", crate::wall_clock::iso8601(utc));
+                            let _ = writeln!(
+                                reply,
+                                "OK {} {}",
+                                crate::wall_clock::iso8601(utc),
+                                clock.tz_rule().as_str()
+                            );
                         }
                         None => {
                             let _ = reply.push_str("ERR not synced\n");
+                        }
+                    },
+                    Ok(ParsedLine::Tz(rule)) => match tz.set(rule).await {
+                        Ok(()) => {
+                            let _ = reply.push_str("OK\n");
+                        }
+                        Err(reason) => {
+                            let _ = writeln!(reply, "ERR {}", reason);
                         }
                     },
                     Err(e) => {
@@ -513,12 +558,45 @@ mod tests {
         }
     }
 
-    /// A [`WallClock`] stopped at a canned instant, or Unsynced if `None`.
-    struct FakeClock(Option<u64>);
+    /// A [`WallClock`] stopped at a canned instant, or Unsynced if `None`,
+    /// with whatever TZ Rule [`FakeTzStore`] last set (UTC until then).
+    struct FakeClock {
+        utc: Option<u64>,
+        tz: core::cell::RefCell<TzRule>,
+    }
+
+    impl FakeClock {
+        fn new(utc: Option<u64>) -> Self {
+            FakeClock {
+                utc,
+                tz: core::cell::RefCell::new(TzRule::utc()),
+            }
+        }
+    }
 
     impl WallClock for FakeClock {
         fn utc_now(&self) -> Option<u64> {
-            self.0
+            self.utc
+        }
+
+        fn tz_rule(&self) -> TzRule {
+            self.tz.borrow().clone()
+        }
+    }
+
+    /// A [`TzStore`] that puts the rule in force on `clock` when its canned
+    /// outcome is `Ok`, standing in for persisting it.
+    struct FakeTzStore<'a> {
+        clock: &'a FakeClock,
+        outcome: Result<(), &'static str>,
+    }
+
+    impl TzStore for FakeTzStore<'_> {
+        async fn set(&mut self, rule: TzRule) -> Result<(), &'static str> {
+            if self.outcome.is_ok() {
+                *self.clock.tz.borrow_mut() = rule;
+            }
+            self.outcome
         }
     }
 
@@ -551,6 +629,17 @@ mod tests {
         bond_outcome: Result<(), &'static str>,
         utc: Option<u64>,
     ) -> std::string::String {
+        run_with_tz(input, wifi_outcome, bond_outcome, utc, Ok(()))
+    }
+
+    /// [`run_with_clock`] with `TZ` saves resolving to `tz_outcome`.
+    fn run_with_tz(
+        input: &[u8],
+        wifi_outcome: Result<&'static str, &'static str>,
+        bond_outcome: Result<(), &'static str>,
+        utc: Option<u64>,
+        tz_outcome: Result<(), &'static str>,
+    ) -> std::string::String {
         let reader = FakeReader {
             bytes: input.to_vec(),
             pos: 0,
@@ -567,9 +656,13 @@ mod tests {
             outcome: bond_outcome,
         };
 
-        let clock = FakeClock(utc);
+        let clock = FakeClock::new(utc);
+        let mut tz = FakeTzStore {
+            clock: &clock,
+            outcome: tz_outcome,
+        };
 
-        let session = run_session(reader, writer, &display, &mut wifi, &mut bond, &clock);
+        let session = run_session(reader, writer, &display, &mut wifi, &mut bond, &clock, &mut tz);
         let fake_display = async {
             loop {
                 display.receive().await;
@@ -697,7 +790,7 @@ mod tests {
         // 2026-10-03T12:34:56Z.
         assert_eq!(
             run_with_clock(b"TIME\n", ok_wifi(), ok_bond(), Some(1_791_030_896)),
-            "OK 2026-10-03T12:34:56Z\n"
+            "OK 2026-10-03T12:34:56Z UTC0\n"
         );
     }
 
@@ -705,13 +798,90 @@ mod tests {
     fn time_is_case_insensitive() {
         assert_eq!(
             run_with_clock(b"time\n", ok_wifi(), ok_bond(), Some(0)),
-            "OK 1970-01-01T00:00:00Z\n"
+            "OK 1970-01-01T00:00:00Z UTC0\n"
         );
     }
 
     #[test]
     fn time_unsynced() {
         assert_eq!(run("TIME\n", ok_wifi(), ok_bond()), "ERR not synced\n");
+    }
+
+    #[test]
+    fn tz_valid_then_time_reports_it() {
+        assert_eq!(
+            run_with_clock(
+                b"TZ PST8PDT,M3.2.0,M11.1.0\nTIME\n",
+                ok_wifi(),
+                ok_bond(),
+                Some(1_791_030_896)
+            ),
+            "OK\nOK 2026-10-03T12:34:56Z PST8PDT,M3.2.0,M11.1.0\n"
+        );
+    }
+
+    #[test]
+    fn tz_is_case_insensitive_but_rule_is_kept_verbatim() {
+        assert_eq!(
+            run_with_clock(b"tz <+0530>-5:30\ntime\n", ok_wifi(), ok_bond(), Some(0)),
+            "OK\nOK 1970-01-01T00:00:00Z <+0530>-5:30\n"
+        );
+    }
+
+    #[test]
+    fn tz_utc0_restores_utc() {
+        assert_eq!(
+            run_with_clock(b"TZ EST5EDT\nTZ UTC0\nTIME\n", ok_wifi(), ok_bond(), Some(0)),
+            "OK\nOK\nOK 1970-01-01T00:00:00Z UTC0\n"
+        );
+    }
+
+    #[test]
+    fn tz_bare_is_bad_args() {
+        assert_eq!(run("TZ\n", ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run("TZ   \n", ok_wifi(), ok_bond()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn tz_malformed_is_bad_tz_and_keeps_rule() {
+        assert_eq!(
+            run_with_clock(b"TZ PST8PDT,M3.2.0\nTIME\n", ok_wifi(), ok_bond(), Some(0)),
+            "ERR bad tz\nOK 1970-01-01T00:00:00Z UTC0\n"
+        );
+    }
+
+    #[test]
+    fn tz_day_of_year_form_is_bad_tz() {
+        assert_eq!(
+            run("TZ <+0330>-3:30<+0430>,J79/24,J263/24\n", ok_wifi(), ok_bond()),
+            "ERR bad tz\n"
+        );
+    }
+
+    #[test]
+    fn tz_save_fails() {
+        assert_eq!(
+            run_with_tz(
+                b"TZ EST5\nTIME\n",
+                ok_wifi(),
+                ok_bond(),
+                Some(0),
+                Err("flash write failed")
+            ),
+            "ERR flash write failed\nOK 1970-01-01T00:00:00Z UTC0\n"
+        );
+    }
+
+    #[test]
+    fn time_reply_with_longest_tz_fits() {
+        let rule = std::format!("<{}>0", "A".repeat(crate::tz::MAX_TZ_LEN - 3));
+        let input = std::format!("TZ {rule}\nTIME\n");
+        let expected = std::format!("OK\nOK 2026-10-03T12:34:56Z {rule}\n");
+        assert_eq!(expected.len() - 3, MAX_REPLY_LEN);
+        assert_eq!(
+            run_with_clock(input.as_bytes(), ok_wifi(), ok_bond(), Some(1_791_030_896)),
+            expected
+        );
     }
 
     #[test]
@@ -944,7 +1114,12 @@ mod tests {
                 };
                 let mut wifi = FakeWifi { outcome: ok_wifi() };
                 let mut bond = FakeBondClear { outcome: ok_bond() };
-                run_session(reader, writer, display, &mut wifi, &mut bond, &FakeClock(None)).await;
+                let clock = FakeClock::new(None);
+                let mut tz = FakeTzStore {
+                    clock: &clock,
+                    outcome: Ok(()),
+                };
+                run_session(reader, writer, display, &mut wifi, &mut bond, &clock, &mut tz).await;
                 log.borrow_mut().push(Event::Ended(id));
             }
         };
