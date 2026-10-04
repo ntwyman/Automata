@@ -13,7 +13,7 @@ One client's connected lifetime on a Transport: read a command line, dispatch it
 _Avoid_: Connection, request
 
 **Command**:
-A parsed instruction a Session dispatches to the display loop: `TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `UNPAIR`. Transport-agnostic — the display loop only ever sees a `Command`, never which Transport it arrived over.
+A parsed instruction a Session dispatches to the display loop: `TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `FORGET`, `UNPAIR`. Transport-agnostic — the display loop only ever sees a `Command`, never which Transport it arrived over.
 
 **Bond**:
 The persisted cryptographic pairing record (identity + LTK) that lets a previously-paired phone re-establish an encrypted BLE link with no user action. Exactly one Bond is stored at a time; a fresh pairing overwrites it.
@@ -41,3 +41,11 @@ The state before the first Sync since boot, when there's no UTC to show: the gri
 **TZ Rule**:
 The persisted POSIX TZ string (e.g. `PST8PDT,M3.2.0,M11.1.0`) that converts UTC to local time, including DST transitions. Set by `TZ`; defaults to UTC when never set. See `docs/adr/0003-posix-tz-rule-on-device.md`.
 _Avoid_: Timezone (ambiguous with IANA names like `America/Los_Angeles`, which the device never sees), offset
+
+**Saved Network**:
+The persisted SSID + password from the last `WIFI` join that succeeded (`OK <addr>`). Exactly one is stored; a failed `WIFI` leaves it untouched, and `FORGET` clears it (and leaves the network). Stored in plaintext — see `docs/adr/0004-plaintext-saved-network.md`.
+_Avoid_: Credentials, profile
+
+**Rejoin**:
+The device's own join to its Saved Network, with no client involved: at boot, and whenever it's without a DHCP lease after that (the link dropped, or a join never got one), retrying with backoff (10s, 30s, 1m, then every 5m) for as long as a Saved Network exists. Distinct from a client's `WIFI` join.
+_Avoid_: Reconnect, auto-join

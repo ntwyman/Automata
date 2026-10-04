@@ -23,7 +23,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
-use pico_w_display::protocol::{self, TzStore, WallClock, WifiJoin};
+use pico_w_display::protocol::{self, TzStore, WallClock, WifiControl};
 use trouble_host::prelude::*;
 
 use crate::bond_store::{Bonds, BondStore};
@@ -201,7 +201,7 @@ impl Write for BleWriter<'_> {
 // One parameter per thing a Session or the Bond lifecycle needs, each
 // already its own small handle; bundling them would only move the count.
 #[allow(clippy::too_many_arguments)]
-pub async fn run<J: WifiJoin, C: WallClock, Z: TzStore>(
+pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
     controller: BtController,
     display: &protocol::DisplayMailbox,
     mut wifi: J,

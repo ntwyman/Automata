@@ -1,20 +1,27 @@
-//! Flash-backed device settings, and the TZ Rule in force.
+//! Flash-backed device settings — the TZ Rule and the Saved Network — and
+//! the TZ Rule in force.
 //!
 //! Backed by `sequential-storage`'s wear-levelled map over the
 //! `SETTINGS_STORAGE` region `memory.x` reserves (4 x 4 KiB sectors), one
-//! item per [`Key`] — unlike `bond_store.rs`'s single-record map, so later
-//! settings (e.g. saved Wi-Fi credentials) can share it. `main.rs` calls
-//! [`SettingsStore::load_tz`] once at boot and publishes the result to
-//! [`TZ_RULE`]; `TZ` (via [`TzSetting`]) persists a new rule then publishes it.
+//! item per [`Key`] — unlike `bond_store.rs`'s single-record map, so several
+//! settings can share it. `main.rs` calls [`SettingsStore::load_tz`] once at
+//! boot and publishes the result to [`TZ_RULE`]; `TZ` (via [`TzSetting`])
+//! persists a new rule then publishes it. The Saved Network is loaded at
+//! boot too, but `wifi.rs` owns it from then on.
+//!
+//! The Saved Network's password is stored in plaintext; see
+//! `docs/adr/0004-plaintext-saved-network.md`.
 
 use defmt::{info, warn};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
-use pico_w_display::protocol::TzStore;
+use heapless::String;
+use pico_w_display::protocol::{MAX_PASSWORD_LEN, MAX_SSID_LEN, TzStore};
 use pico_w_display::tz::{MAX_TZ_LEN, TzRule};
 use sequential_storage::cache::{Cache, Uncached};
-use sequential_storage::map::{MapConfig, MapStorage};
+use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
+use serde::{Deserialize, Serialize};
 
 use crate::flash::{self, FlashHandle, SharedFlash};
 
@@ -23,12 +30,50 @@ use crate::flash::{self, FlashHandle, SharedFlash};
 enum Key {
     /// The TZ Rule's text, as sent.
     Tz = 1,
+    /// The Saved Network, as a [`StoredNetwork`].
+    Network = 2,
 }
 
-/// Headroom for the largest item (a [`MAX_TZ_LEN`] TZ Rule today; Wi-Fi
-/// credentials later) plus `sequential-storage`'s item framing and key.
+/// The largest [`StoredNetwork`]: each `str` is a one-byte `postcard`
+/// length (both fit under 128) then its bytes.
+const MAX_NETWORK_LEN: usize = 1 + MAX_SSID_LEN + 1 + MAX_PASSWORD_LEN;
+
+/// Headroom for the largest item (a full Saved Network, or a [`MAX_TZ_LEN`]
+/// TZ Rule) plus `sequential-storage`'s item framing and key.
 const BUF_LEN: usize = 128;
 const _: () = assert!(MAX_TZ_LEN + 16 <= BUF_LEN);
+const _: () = assert!(MAX_NETWORK_LEN + 16 <= BUF_LEN);
+
+/// The network a successful `WIFI` joined, kept so the device can Rejoin it
+/// at boot or after a drop. Never log `password`.
+#[derive(Clone)]
+pub struct SavedNetwork {
+    pub ssid: String<MAX_SSID_LEN>,
+    pub password: String<MAX_PASSWORD_LEN>,
+}
+
+impl SavedNetwork {
+    /// `None` if either part is over its 802.11 limit.
+    pub fn new(ssid: &str, password: &str) -> Option<Self> {
+        let mut network = SavedNetwork {
+            ssid: String::new(),
+            password: String::new(),
+        };
+        network.ssid.push_str(ssid).ok()?;
+        network.password.push_str(password).ok()?;
+        Some(network)
+    }
+}
+
+/// [`SavedNetwork`]'s flash form: borrowed, so it can be serialized from
+/// and deserialized into `SettingsStore`'s buffer with no copies.
+#[derive(Serialize, Deserialize)]
+struct StoredNetwork<'a> {
+    ssid: &'a str,
+    password: &'a str,
+}
+
+impl<'a> PostcardValue<'a> for StoredNetwork<'a> {}
 
 type SettingsMap = MapStorage<u8, FlashHandle, Cache<Uncached, Uncached, Uncached, u8>>;
 
@@ -101,6 +146,63 @@ impl SettingsStore {
             Err(_) => {
                 warn!("settings flash write failed");
                 Err("flash write failed")
+            }
+        }
+    }
+
+    /// The persisted Saved Network, or `None` if there isn't one — or if
+    /// what's stored can't be read, which leaves the device to wait for a
+    /// `WIFI` rather than failing boot.
+    pub async fn load_network(&mut self) -> Option<SavedNetwork> {
+        let stored = match self
+            .map
+            .fetch_item::<StoredNetwork>(&mut self.buf, &(Key::Network as u8))
+            .await
+        {
+            Ok(stored) => stored?,
+            Err(_) => {
+                warn!("settings flash read failed");
+                return None;
+            }
+        };
+        let network = SavedNetwork::new(stored.ssid, stored.password);
+        if network.is_none() {
+            warn!("stored network is invalid; ignoring it");
+        }
+        network
+    }
+
+    /// Persists `network` as the Saved Network, replacing any previous one.
+    /// Briefly glitches the LED output and cyw43 SPI traffic, like
+    /// [`SettingsStore::save_tz`].
+    pub async fn save_network(&mut self, network: &SavedNetwork) -> Result<(), &'static str> {
+        let stored = StoredNetwork {
+            ssid: &network.ssid,
+            password: &network.password,
+        };
+        match self.map.store_item(&mut self.buf, &(Key::Network as u8), &stored).await {
+            Ok(()) => {
+                info!("saved network persisted: {}", network.ssid.as_str());
+                Ok(())
+            }
+            Err(_) => {
+                warn!("settings flash write failed");
+                Err("flash write failed")
+            }
+        }
+    }
+
+    /// Clears the Saved Network. Idempotent: clearing when nothing is saved
+    /// is not an error.
+    pub async fn clear_network(&mut self) -> Result<(), &'static str> {
+        match self.map.remove_item(&mut self.buf, &(Key::Network as u8)).await {
+            Ok(()) => {
+                info!("saved network cleared");
+                Ok(())
+            }
+            Err(_) => {
+                warn!("settings flash clear failed");
+                Err("flash clear failed")
             }
         }
     }

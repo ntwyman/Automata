@@ -9,8 +9,8 @@ MEMORY {
     FLASH : ORIGIN = 0x10000000, LENGTH = 2048K - 32K
     /*
      * Reserved for `settings.rs`'s keyed `sequential-storage` map: the TZ
-     * Rule (ticket #13 / ADR-0003), and room for later settings such as
-     * saved Wi-Fi credentials. A separate region from BOND_STORAGE so that
+     * Rule (ticket #13 / ADR-0003) and the Saved Network (ticket #14 /
+     * ADR-0004), with room for later settings. A separate region from BOND_STORAGE so that
      * one's layout (and any Bond already stored in it) is left untouched.
      */
     SETTINGS_STORAGE : ORIGIN = ORIGIN(FLASH) + LENGTH(FLASH), LENGTH = 16K

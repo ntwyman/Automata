@@ -43,15 +43,15 @@ macro_rules! warn {
 }
 
 /// What a transport needs to provide so [`run_session`] can dispatch `WIFI`
-/// without depending on any concrete Wi-Fi stack. Kept separate from
-/// [`Command`]/[`DisplayMailbox`] because joining a network is a direct,
-/// awaited round-trip — there's no display to ack it.
-// Only implemented in this workspace (by `wifi::Wifi` and this module's own
-// test fake), so the usual reason for the `async_fn_in_trait` lint — an
-// external implementor needing `Send` bounds it can't add later — doesn't
-// apply.
+/// and `FORGET` without depending on any concrete Wi-Fi stack. Kept separate
+/// from [`Command`]/[`DisplayMailbox`] because joining or forgetting a
+/// network is a direct, awaited round-trip — there's no display to ack it.
+// Only implemented in this workspace (by `wifi::SharedWifi` and this
+// module's own test fake), so the usual reason for the `async_fn_in_trait`
+// lint — an external implementor needing `Send` bounds it can't add later —
+// doesn't apply.
 #[allow(async_fn_in_trait)]
-pub trait WifiJoin {
+pub trait WifiControl {
     /// The joined network's address, formatted straight into the `OK <addr>`
     /// reply — hence the `Display` bound.
     type Address: core::fmt::Display;
@@ -60,11 +60,17 @@ pub trait WifiJoin {
     /// reason string that's safe to send straight back to a client as
     /// `ERR <reason>`.
     async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Self::Address, &'static str>;
+
+    /// Clears the Saved Network and leaves the current one, returning a
+    /// reason string that's safe to send straight back to a client as
+    /// `ERR <reason>` on failure. Idempotent: forgetting with nothing saved
+    /// is not an error.
+    async fn forget(&mut self) -> Result<(), &'static str>;
 }
 
 /// What a transport needs to provide so [`run_session`] can dispatch
 /// `UNPAIR` without depending on any concrete Bond-storage or BLE-stack
-/// type. Mirrors [`WifiJoin`]'s shape and the same reasoning: `UNPAIR` is a
+/// type. Mirrors [`WifiControl`]'s shape and the same reasoning: `UNPAIR` is a
 /// direct, awaited round-trip that has nothing to do with the display.
 #[allow(async_fn_in_trait)]
 pub trait BondClear {
@@ -95,6 +101,11 @@ pub trait TzStore {
     /// the previous rule still in force.
     async fn set(&mut self, rule: TzRule) -> Result<(), &'static str>;
 }
+
+/// Longest SSID 802.11 allows, and so `WIFI` accepts.
+pub const MAX_SSID_LEN: usize = 32;
+/// Longest WPA2/WPA3 passphrase, and so `WIFI` accepts.
+pub const MAX_PASSWORD_LEN: usize = 63;
 
 /// Longest line we'll accept; comfortably longer than any real command (the
 /// longest is `WIFI <32-byte ssid> <63-byte password>`). Anything longer is
@@ -187,7 +198,10 @@ pub enum Command {
 /// to do with the grid.
 enum ParsedLine {
     Display(Command),
-    Wifi(String<32>, String<63>),
+    Wifi(String<MAX_SSID_LEN>, String<MAX_PASSWORD_LEN>),
+    /// Clear the Saved Network and leave the current one, handled directly
+    /// in [`run_session`] like `Wifi`.
+    Forget,
     /// Clear the persisted Bond, handled directly in [`run_session`] like
     /// `Wifi` since it has nothing to do with the grid.
     Unpair,
@@ -236,6 +250,8 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         parse_brightness(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("WIFI") {
         parse_wifi(rest)
+    } else if cmd.eq_ignore_ascii_case("FORGET") {
+        Ok(ParsedLine::Forget)
     } else if cmd.eq_ignore_ascii_case("UNPAIR") {
         Ok(ParsedLine::Unpair)
     } else if cmd.eq_ignore_ascii_case("TIME") {
@@ -300,11 +316,11 @@ fn parse_wifi(s: &str) -> Result<ParsedLine, ProtocolError> {
         return Err(ProtocolError::BadArgs);
     }
 
-    let mut ssid_buf: String<32> = String::new();
+    let mut ssid_buf: String<MAX_SSID_LEN> = String::new();
     ssid_buf
         .push_str(ssid)
         .map_err(|_| ProtocolError::BadArgs)?;
-    let mut password_buf: String<63> = String::new();
+    let mut password_buf: String<MAX_PASSWORD_LEN> = String::new();
     password_buf
         .push_str(password)
         .map_err(|_| ProtocolError::BadArgs)?;
@@ -378,7 +394,7 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallClock, Z: TzStore>(
+pub async fn run_session<R: Read, W: Write, J: WifiControl, U: BondClear, C: WallClock, Z: TzStore>(
     mut reader: R,
     mut writer: W,
     display: &DisplayMailbox,
@@ -430,6 +446,14 @@ pub async fn run_session<R: Read, W: Write, J: WifiJoin, U: BondClear, C: WallCl
                             }
                         }
                     }
+                    Ok(ParsedLine::Forget) => match wifi.forget().await {
+                        Ok(()) => {
+                            let _ = reply.push_str("OK\n");
+                        }
+                        Err(reason) => {
+                            let _ = writeln!(reply, "ERR {}", reason);
+                        }
+                    },
                     Ok(ParsedLine::Unpair) => match bond.clear().await {
                         Ok(()) => {
                             let _ = reply.push_str("OK\n");
@@ -526,14 +550,25 @@ mod tests {
         }
     }
 
-    /// A [`WifiJoin`] that returns a canned outcome, ignoring the credentials
-    /// it's given — the parsing/threading of `ssid`/`password` is exercised
-    /// separately, this is only about `run_session`'s handling of the reply.
+    /// A [`WifiControl`] that returns canned outcomes, ignoring the SSID and
+    /// password it's given — the parsing/threading of `ssid`/`password` is
+    /// exercised separately, this is only about `run_session`'s handling of
+    /// the reply.
     struct FakeWifi {
-        outcome: Result<&'static str, &'static str>,
+        join_outcome: Result<&'static str, &'static str>,
+        forget_outcome: Result<(), &'static str>,
     }
 
-    impl WifiJoin for FakeWifi {
+    impl FakeWifi {
+        fn joining(join_outcome: Result<&'static str, &'static str>) -> Self {
+            FakeWifi {
+                join_outcome,
+                forget_outcome: Ok(()),
+            }
+        }
+    }
+
+    impl WifiControl for FakeWifi {
         type Address = &'static str;
 
         async fn join(
@@ -541,7 +576,11 @@ mod tests {
             _ssid: &str,
             _password: &[u8],
         ) -> Result<&'static str, &'static str> {
-            self.outcome
+            self.join_outcome
+        }
+
+        async fn forget(&mut self) -> Result<(), &'static str> {
+            self.forget_outcome
         }
     }
 
@@ -640,6 +679,26 @@ mod tests {
         utc: Option<u64>,
         tz_outcome: Result<(), &'static str>,
     ) -> std::string::String {
+        run_with_wifi(input, FakeWifi::joining(wifi_outcome), bond_outcome, utc, tz_outcome)
+    }
+
+    /// [`run`] with `FORGET` resolving to `forget_outcome`.
+    fn run_forget(input: &str, forget_outcome: Result<(), &'static str>) -> std::string::String {
+        let wifi = FakeWifi {
+            join_outcome: ok_wifi(),
+            forget_outcome,
+        };
+        run_with_wifi(input.as_bytes(), wifi, ok_bond(), None, Ok(()))
+    }
+
+    /// [`run_with_tz`] with every `WIFI`/`FORGET` handled by `wifi`.
+    fn run_with_wifi(
+        input: &[u8],
+        mut wifi: FakeWifi,
+        bond_outcome: Result<(), &'static str>,
+        utc: Option<u64>,
+        tz_outcome: Result<(), &'static str>,
+    ) -> std::string::String {
         let reader = FakeReader {
             bytes: input.to_vec(),
             pos: 0,
@@ -649,9 +708,6 @@ mod tests {
             written: &mut written,
         };
         let display = DisplayMailbox::new();
-        let mut wifi = FakeWifi {
-            outcome: wifi_outcome,
-        };
         let mut bond = FakeBondClear {
             outcome: bond_outcome,
         };
@@ -770,6 +826,24 @@ mod tests {
         let password = "a".repeat(64);
         let line = std::format!("WIFI myssid {password}\n");
         assert_eq!(run(&line, ok_wifi(), ok_bond()), "ERR bad args\n");
+    }
+
+    #[test]
+    fn forget_valid() {
+        assert_eq!(run_forget("FORGET\n", Ok(())), "OK\n");
+    }
+
+    #[test]
+    fn forget_is_case_insensitive() {
+        assert_eq!(run_forget("forget\n", Ok(())), "OK\n");
+    }
+
+    #[test]
+    fn forget_clear_fails() {
+        assert_eq!(
+            run_forget("FORGET\n", Err("flash clear failed")),
+            "ERR flash clear failed\n"
+        );
     }
 
     #[test]
@@ -1112,7 +1186,7 @@ mod tests {
                     log,
                     fail: client.fail_writes,
                 };
-                let mut wifi = FakeWifi { outcome: ok_wifi() };
+                let mut wifi = FakeWifi::joining(ok_wifi());
                 let mut bond = FakeBondClear { outcome: ok_bond() };
                 let clock = FakeClock::new(None);
                 let mut tz = FakeTzStore {

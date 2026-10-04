@@ -2,7 +2,9 @@
 //! display loop and `TIME`.
 //!
 //! [`task`] Syncs as soon as the Wi-Fi link has a DHCP lease, then every 6h;
-//! a failed attempt backs off per [`sntp::retry_delay`]. Each Sync publishes
+//! a failed attempt backs off per [`sntp::retry_delay`]. Losing and
+//! regaining the lease (e.g. a Rejoin) cuts either wait short and Syncs
+//! straight away. Each Sync publishes
 //! the UTC time at `Instant` zero to [`WALL_CLOCK`] — a `Watch`, not a
 //! `Command`, since nothing about it needs a reply. Between Syncs, and
 //! indefinitely if later ones keep failing, the Wall Clock free-runs on the
@@ -10,6 +12,7 @@
 //! `sntp` module; this file is only the DNS/UDP plumbing around it.
 
 use defmt::{info, warn};
+use embassy_futures::select::{Either, select};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::Stack;
@@ -76,21 +79,32 @@ pub async fn task(stack: Stack<'static>) -> ! {
     let mut failures = 0u32;
     loop {
         stack.wait_config_up().await;
-        match sync(stack, min_unix).await {
+        let wait = match sync(stack, min_unix).await {
             Ok(utc_secs) => {
                 // Whole seconds, so this is the start of the reply's second.
                 let boot_utc_ms = (utc_secs * 1000).saturating_sub(Instant::now().as_millis());
                 sender.send(boot_utc_ms);
                 info!("synced: {}", wall_clock::iso8601(utc_secs).as_str());
                 failures = 0;
-                Timer::after(RESYNC_INTERVAL).await;
+                RESYNC_INTERVAL
             }
             Err(e) => {
                 failures = failures.saturating_add(1);
                 let delay = sntp::retry_delay(failures);
                 warn!("sync failed: {}; retrying in {}s", e, delay);
-                Timer::after_secs(delay).await;
+                Duration::from_secs(delay)
             }
+        };
+        // A failure was likely for want of a network, and a lost lease may
+        // mean free-running for a while: either way, a network coming back
+        // (a Rejoin after a router reboot, say) shouldn't wait this out.
+        let relinked = async {
+            stack.wait_config_down().await;
+            stack.wait_config_up().await;
+        };
+        if let Either::Second(()) = select(Timer::after(wait), relinked).await {
+            info!("network back up; syncing now");
+            failures = 0;
         }
     }
 }

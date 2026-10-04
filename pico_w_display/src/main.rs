@@ -1,7 +1,8 @@
 //! Displays the NTP-synced Wall Clock (24-hour `HH:MM` local time, per the
 //! persisted TZ Rule) on a 17x17 WS2812 LED grid, or whatever a client
 //! connected over USB serial or BLE asks for instead. See `protocol.rs` for
-//! the command set, `ntp.rs` for Syncing and `settings.rs` for the TZ Rule.
+//! the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
+//! `wifi.rs` for Rejoining the Saved Network.
 
 #![no_std]
 #![no_main]
@@ -9,7 +10,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::join::join5;
+use embassy_futures::join::{join, join5};
 use embassy_futures::select::{Either4, select4};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
@@ -153,16 +154,12 @@ async fn main(spawner: Spawner) {
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
 
-    let (wifi_dev, bt_device, net_stack) = wifi::init(
+    let (mut wifi_dev, bt_device, net_stack) = wifi::init(
         spawner, p.PIO1, p.DMA_CH1, p.DMA_CH2, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29,
     )
     .await;
-    // Idles on `wait_config_up` until a `WIFI` join gets a DHCP lease.
+    // Idles on `wait_config_up` until a join gets a DHCP lease.
     spawner.spawn(unwrap!(ntp::task(net_stack)));
-    // Shared rather than owned outright: the USB and BLE sessions below run
-    // concurrently and each needs its own `WifiJoin` handle (see
-    // `wifi::SharedWifi`), so a plain `&mut Wifi` can't work for both.
-    let wifi_mutex: Mutex<CriticalSectionRawMutex, wifi::Wifi> = Mutex::new(wifi_dev);
 
     // Deliberately sequential, *after* Wi-Fi bring-up finishes: the async
     // flash read below runs on DMA_CH3, which shares `DMA_IRQ_0` with the
@@ -181,8 +178,24 @@ async fn main(spawner: Spawner) {
         info!("restoring tz rule: {}", rule.as_str());
         settings::TZ_RULE.sender().send(rule);
     }
+    if let Some(network) = settings_store.load_network().await {
+        info!("restoring saved network: {}", network.ssid.as_str());
+        wifi_dev.restore(network);
+    }
     let settings_mutex: Mutex<CriticalSectionRawMutex, settings::SettingsStore> =
         Mutex::new(settings_store);
+
+    // Shared rather than owned outright: the USB and BLE sessions and the
+    // Rejoin supervisor below run concurrently, and each needs its own
+    // handle (see `wifi::SharedWifi`), so a plain `&mut Wifi` can't work.
+    let wifi_mutex: Mutex<CriticalSectionRawMutex, wifi::Wifi> = Mutex::new(wifi_dev);
+    let rejoin_signal = wifi::RejoinSignal::new();
+    let shared_wifi = wifi::SharedWifi {
+        wifi: &wifi_mutex,
+        settings: &settings_mutex,
+        rejoin: &rejoin_signal,
+    };
+    let rejoin_fut = wifi::supervise(&wifi_mutex, net_stack, &rejoin_signal);
 
     // `initial_bond` (loaded above) lets a previously-bonded phone reconnect
     // on `bt::run`'s very first advertisement — even right after this
@@ -220,7 +233,7 @@ async fn main(spawner: Spawner) {
     let usb_fut = usb_dev.run();
 
     let protocol_fut = async {
-        let mut wifi = wifi::SharedWifi(&wifi_mutex);
+        let mut wifi = shared_wifi;
         let mut bonds = bond_store::Bonds {
             store: &bond_store_mutex,
             evict: &unpair_signal,
@@ -249,7 +262,7 @@ async fn main(spawner: Spawner) {
     let ble_fut = bt::run(
         ble_controller,
         &display,
-        wifi::SharedWifi(&wifi_mutex),
+        shared_wifi,
         &ntp::Clock,
         settings::TzSetting {
             store: &settings_mutex,
@@ -308,5 +321,9 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    join5(usb_fut, protocol_fut, ble_fut, display_fut, pairing_window_fut).await;
+    join(
+        join5(usb_fut, protocol_fut, ble_fut, display_fut, pairing_window_fut),
+        rejoin_fut,
+    )
+    .await;
 }

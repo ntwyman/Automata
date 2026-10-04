@@ -11,7 +11,12 @@
 //! returns.
 //!
 //! The `embassy-net` [`Stack`] is handed back too, for `ntp.rs`'s SNTP
-//! Sync; `Stack<'static>` is `Copy`, so it and [`Wifi`] each hold one.
+//! Sync and [`supervise`]; `Stack<'static>` is `Copy`, so they and [`Wifi`]
+//! each hold one.
+//!
+//! [`Wifi`] also holds the Saved Network in RAM. A `WIFI` that joins (via
+//! [`SharedWifi`]) saves it, `FORGET` clears it, and [`supervise`] keeps the
+//! device on it — at boot, and whenever the link drops.
 //!
 //! Firmware blobs are vendored under `cyw43-firmware/` at the repo root,
 //! fetched from the embassy-rs project (see the LICENSE file there).
@@ -19,8 +24,9 @@
 use cyw43::bluetooth::BtDriver;
 use cyw43::{Control, JoinOptions, aligned_bytes};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
-use defmt::unwrap;
+use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_net::{Config, ConfigV4, Ipv4Address, Stack, StackResources};
 use embassy_rp::Peri;
 use embassy_rp::clocks::RoscRng;
@@ -30,11 +36,14 @@ use embassy_rp::peripherals::{DMA_CH1, DMA_CH2, PIN_23, PIN_24, PIN_25, PIN_29, 
 use embassy_rp::pio::Pio;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, with_timeout};
-use pico_w_display::protocol::WifiJoin;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer, with_timeout};
+use pico_w_display::protocol::WifiControl;
+use pico_w_display::rejoin;
 use static_cell::StaticCell;
 
 use crate::Irqs;
+use crate::settings::{SavedNetwork, SettingsStore};
 
 type WifiSpi = PioSpi<'static, PIO1, 0>;
 
@@ -53,14 +62,19 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
     runner.run().await
 }
 
-/// Handle for joining a Wi-Fi network, obtained once from [`init`].
+/// Handle for joining a Wi-Fi network, obtained once from [`init`], plus
+/// the Saved Network to Rejoin.
 pub struct Wifi {
     control: Control<'static>,
     stack: Stack<'static>,
+    saved: Option<SavedNetwork>,
 }
 
-impl WifiJoin for Wifi {
-    type Address = Ipv4Address;
+impl Wifi {
+    /// Sets the Saved Network loaded from flash at boot, for [`supervise`].
+    pub fn restore(&mut self, network: SavedNetwork) {
+        self.saved = Some(network);
+    }
 
     /// Joins `ssid` using `password` (a WPA2/WPA3 passphrase) and waits for
     /// a DHCP lease. Returns the assigned address, or a reason string that's
@@ -93,17 +107,117 @@ impl WifiJoin for Wifi {
     }
 }
 
-/// Adapts a [`Wifi`] shared behind a mutex into [`WifiJoin`], so the USB and
-/// BLE sessions (`main.rs`) can run concurrently without both needing a
-/// simultaneous `&mut Wifi` — each holds its own `SharedWifi` and only the
-/// actual `join()` call takes the lock.
-pub struct SharedWifi<'a>(pub &'a Mutex<CriticalSectionRawMutex, Wifi>);
+/// Tells [`supervise`] a `WIFI` or `FORGET` just changed the link or the Saved
+/// Network, so it re-checks both and restarts its backoff.
+pub type RejoinSignal = Signal<CriticalSectionRawMutex, ()>;
 
-impl WifiJoin for SharedWifi<'_> {
+/// Adapts a [`Wifi`] shared behind a mutex into [`WifiControl`], so the USB
+/// and BLE sessions (`main.rs`) and [`supervise`] can run concurrently without
+/// all needing a simultaneous `&mut Wifi` — each holds its own handle and
+/// only an actual join or forget takes the lock.
+///
+/// Wherever both are held, `wifi` is locked before `settings`.
+#[derive(Clone, Copy)]
+pub struct SharedWifi<'a> {
+    pub wifi: &'a Mutex<CriticalSectionRawMutex, Wifi>,
+    pub settings: &'a Mutex<CriticalSectionRawMutex, SettingsStore>,
+    pub rejoin: &'a RejoinSignal,
+}
+
+impl WifiControl for SharedWifi<'_> {
     type Address = Ipv4Address;
 
+    /// Joins, and on success makes the network the Saved Network. A failed
+    /// join leaves the Saved Network as it was, for [`supervise`] to go back to.
     async fn join(&mut self, ssid: &str, password: &[u8]) -> Result<Ipv4Address, &'static str> {
-        self.0.lock().await.join(ssid, password).await
+        let mut wifi = self.wifi.lock().await;
+        let joined = wifi.join(ssid, password).await;
+        if joined.is_ok() {
+            // `protocol` only passes ASCII, and the same 802.11 bounds.
+            match core::str::from_utf8(password).ok().and_then(|p| SavedNetwork::new(ssid, p)) {
+                Some(network) => {
+                    // Kept in RAM even if persisting fails, so a later drop
+                    // still Rejoins this network rather than the old one;
+                    // the join itself succeeded, so the reply stays `OK`.
+                    let _ = self.settings.lock().await.save_network(&network).await;
+                    wifi.saved = Some(network);
+                }
+                None => warn!("joined network can't be saved"),
+            }
+        }
+        self.rejoin.signal(());
+        joined
+    }
+
+    /// Clears the Saved Network from flash, then from RAM, and leaves the
+    /// current network. If clearing flash fails, nothing changes.
+    async fn forget(&mut self) -> Result<(), &'static str> {
+        let mut wifi = self.wifi.lock().await;
+        self.settings.lock().await.clear_network().await?;
+        wifi.saved = None;
+        wifi.control.leave().await;
+        self.rejoin.signal(());
+        Ok(())
+    }
+}
+
+/// The Rejoin supervisor: keeps the device on its Saved Network, forever.
+/// Joins it at boot, then whenever there's no DHCP lease — the link dropped,
+/// or a join associated but never got one — retries per
+/// [`rejoin::retry_delay`], whose first step is also the grace period in case
+/// the chip re-associates on its own. Runs in the background, so it never
+/// delays USB or BLE. A `WIFI` or `FORGET` ([`SharedWifi`]) wakes it to
+/// re-check and restart its backoff.
+pub async fn supervise(
+    wifi: &Mutex<CriticalSectionRawMutex, Wifi>,
+    stack: Stack<'static>,
+    wake: &RejoinSignal,
+) -> ! {
+    let mut failures = 0u32;
+    // Whether to wait out a backoff step before the next attempt: not at
+    // boot, where there's no drop to wait out.
+    let mut back_off = false;
+    loop {
+        if wifi.lock().await.saved.is_none() {
+            (failures, back_off) = (0, true);
+            wake.wait().await;
+            continue;
+        }
+        if stack.is_config_up() {
+            (failures, back_off) = (0, true);
+            select(stack.wait_config_down(), wake.wait()).await;
+            continue;
+        }
+        if back_off {
+            let delay = rejoin::retry_delay(failures);
+            info!("rejoining in {}s", delay);
+            if let Either::Second(()) = select(Timer::after_secs(delay), wake.wait()).await {
+                failures = 0;
+                continue;
+            }
+        }
+
+        let mut wifi = wifi.lock().await;
+        // Anything signalled before this lock is already visible under it.
+        wake.reset();
+        // Back up on its own during the wait, or a `WIFI` got the lock first.
+        if stack.is_config_up() {
+            continue;
+        }
+        let Some(network) = wifi.saved.clone() else {
+            continue;
+        };
+        match wifi.join(&network.ssid, network.password.as_bytes()).await {
+            Ok(address) => info!("rejoined {}: {}", network.ssid.as_str(), address),
+            Err(reason) => {
+                warn!("rejoin failed: {}", reason);
+                // A failed boot attempt still gets the first, shortest step.
+                if back_off {
+                    failures = failures.saturating_add(1);
+                }
+                back_off = true;
+            }
+        }
     }
 }
 
@@ -167,7 +281,7 @@ pub async fn init(
     // can never be answered, every 10s, for as long as the device sits
     // unjoined — real SPI/DMA bus traffic on the same PIO1 bus the CYW43439
     // shares between Wi-Fi and Bluetooth, contending with the WS2812
-    // output's own DMA on PIO0 for no benefit. `WifiJoin::join` (above)
+    // output's own DMA on PIO0 for no benefit. `Wifi::join` (above)
     // turns DHCP on only once `control.join` has actually associated.
     let config = Config::default();
     let mut rng = RoscRng;
@@ -184,5 +298,10 @@ pub async fn init(
     );
     spawner.spawn(unwrap!(net_task(runner)));
 
-    (Wifi { control, stack }, bt_device, stack)
+    let wifi = Wifi {
+        control,
+        stack,
+        saved: None,
+    };
+    (wifi, bt_device, stack)
 }
