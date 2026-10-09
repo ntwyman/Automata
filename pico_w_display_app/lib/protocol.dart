@@ -118,6 +118,38 @@ class Unpair extends Command {
   String toString() => 'Unpair()';
 }
 
+/// `TZ <posix>`: persists and applies a TZ Rule. Only the firmware checks
+/// [rule]'s grammar, replying `ERR bad tz` if it can't use it.
+class SetTz extends Command {
+  const SetTz(this.rule);
+
+  final String rule;
+
+  @override
+  bool operator ==(Object other) => other is SetTz && other.rule == rule;
+
+  @override
+  int get hashCode => rule.hashCode;
+
+  @override
+  String toString() => 'SetTz($rule)';
+}
+
+/// Bare `TIME`: replies `OK <UTC ISO-8601> <TZ Rule>`, or `ERR not synced`
+/// before the device's first Sync.
+class QueryTime extends Command {
+  const QueryTime();
+
+  @override
+  bool operator ==(Object other) => other is QueryTime;
+
+  @override
+  int get hashCode => (QueryTime).hashCode;
+
+  @override
+  String toString() => 'QueryTime()';
+}
+
 /// The line the firmware parses back into [command]. Assumes [command]'s
 /// fields are already in range (see the `*Error` validators below).
 String encodeCommand(Command command) => switch (command) {
@@ -128,6 +160,8 @@ String encodeCommand(Command command) => switch (command) {
   SetBrightness(:final level) => 'BRIGHTNESS $level',
   JoinWifi(:final ssid, :final password) => 'WIFI $ssid $password',
   Unpair() => 'UNPAIR',
+  SetTz(:final rule) => 'TZ $rule',
+  QueryTime() => 'TIME',
 };
 
 String _hex(int channel) =>
@@ -160,6 +194,8 @@ Command parseCommand(String line) {
     'BRIGHTNESS' => _parseBrightness(rest.trim()),
     'WIFI' => _parseWifi(rest.trim()),
     'UNPAIR' => const Unpair(),
+    'TZ' => _parseTz(rest.trim()),
+    'TIME' => const QueryTime(),
     _ => throw ProtocolError.unknownCommand,
   };
 }
@@ -202,6 +238,11 @@ Command _parseWifi(String s) {
     throw ProtocolError.badArgs;
   }
   return JoinWifi(ssid, password);
+}
+
+Command _parseTz(String s) {
+  if (s.isEmpty) throw ProtocolError.badArgs;
+  return SetTz(s);
 }
 
 /// 802.11's SSID limit, and `parse_wifi`'s `String<32>`.
@@ -286,6 +327,10 @@ class ReplyErr extends Reply {
   @override
   String toString() => 'ERR $reason';
 }
+
+/// The UTC in `TIME`'s `OK <UTC ISO-8601> <TZ Rule>` [detail]. Throws
+/// [FormatException] if it doesn't start with a timestamp.
+DateTime parseTimeUtc(String detail) => DateTime.parse(detail.split(' ').first);
 
 /// Parses one reply line (terminator optional). Throws [FormatException]
 /// for anything that isn't `OK…` or `ERR …`.

@@ -1,11 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ble/ble_central.dart';
 import '../ble/command_client.dart';
 import '../protocol.dart';
+import '../tz/tz_rule_updater.dart';
+import '../tz/tz_rules.dart';
 
 /// The display's boot-time foreground color and brightness (`main.rs`'s
 /// `DARK_BLUE`, `grid.rs`'s full brightness). The display can't be asked
@@ -14,11 +17,19 @@ const _bootColor = Color(0xff00008b);
 const _bootBrightness = 255.0;
 
 /// Day-to-day control over a Connected display: one control per Command,
-/// each showing the display's own `OK`/`ERR` reply to it inline.
+/// each showing the display's own `OK`/`ERR` reply to it inline. Also keeps
+/// the display on the phone's TZ Rule (see [TzRuleUpdater]).
 class ControlScreen extends StatefulWidget {
-  const ControlScreen({super.key, required this.link});
+  const ControlScreen({
+    super.key,
+    required this.link,
+    this.zoneSource = platformZone,
+  });
 
   final BleLink link;
+
+  /// Where the phone's timezone comes from; replaced in tests.
+  final ZoneSource zoneSource;
 
   @override
   State<ControlScreen> createState() => _ControlScreenState();
@@ -33,8 +44,21 @@ class _ControlScreenState extends State<ControlScreen> {
   late final _brightnessSender = _Sender(_client);
   late final _wifiSender = _Sender(_client);
 
+  late final _tzUpdater = TzRuleUpdater(_client, zoneSource: widget.zoneSource);
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    _tzUpdater.start();
+    // The phone may have changed timezone while the app was away.
+    _lifecycle = AppLifecycleListener(onResume: _tzUpdater.resumed);
+  }
+
   @override
   void dispose() {
+    _lifecycle.dispose();
+    _tzUpdater.dispose();
     for (final sender in [
       _textSender,
       _clockSender,
@@ -54,6 +78,7 @@ class _ControlScreenState extends State<ControlScreen> {
     body: ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        _TzStatusLine(_tzUpdater.status),
         _Section(
           title: 'Message',
           children: [
@@ -192,6 +217,63 @@ class _OutcomeLine extends StatelessWidget {
       );
     },
   );
+}
+
+/// What [TzRuleUpdater] last learned, as one line above the controls; nothing
+/// while it's in flight or got no reply.
+class _TzStatusLine extends StatelessWidget {
+  const _TzStatusLine(this.status);
+
+  final ValueListenable<TzStatus?> status;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: status,
+    builder: (context, status, _) {
+      if (status == null) return const SizedBox.shrink();
+      final colors = Theme.of(context).colorScheme;
+      final (IconData icon, String label, Color? color) = switch (status) {
+        TzSynced(:final utc) => (
+          Icons.schedule,
+          'Synced · ${_hhmm(utc.toLocal())}',
+          null,
+        ),
+        TzUnsynced() => (
+          Icons.hourglass_empty,
+          'Waiting for network time',
+          null,
+        ),
+        TzUnsupported(:final zone, :final offset) => (
+          Icons.warning_amber,
+          'Timezone not supported: $zone (using ${describeOffset(offset)})',
+          colors.error,
+        ),
+        TzRejected() => (
+          Icons.error_outline,
+          'Timezone rejected by display',
+          colors.error,
+        ),
+      };
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Row(
+          children: [
+            Icon(icon, size: 16, color: color ?? colors.onSurfaceVariant),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(label, style: TextStyle(color: color)),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  /// The display's own 24-hour `HH:MM`, plus the phone's zone abbreviation.
+  static String _hhmm(DateTime local) {
+    String two(int n) => '$n'.padLeft(2, '0');
+    return '${two(local.hour)}:${two(local.minute)} ${local.timeZoneName}';
+  }
 }
 
 /// A control's send button, disabled while [sender]'s last Command is

@@ -14,6 +14,11 @@ void main() {
         'WIFI home pass word',
       );
       expect(encodeCommand(const Unpair()), 'UNPAIR');
+      expect(
+        encodeCommand(const SetTz('PST8PDT,M3.2.0,M11.1.0')),
+        'TZ PST8PDT,M3.2.0,M11.1.0',
+      );
+      expect(encodeCommand(const QueryTime()), 'TIME');
     });
 
     test('every encoded Command parses back to itself', () {
@@ -25,6 +30,8 @@ void main() {
         SetBrightness(255),
         JoinWifi('net', 'a b c'),
         Unpair(),
+        SetTz('<+0530>-5:30'),
+        QueryTime(),
       ];
       for (final command in commands) {
         expect(parseCommand(encodeCommand(command)), command);
@@ -45,6 +52,12 @@ void main() {
         throwsProtocolError('unknown command'),
       );
       expect(() => parseCommand(''), throwsProtocolError('unknown command'));
+    });
+
+    test('TZ needs a rule, which only the firmware validates', () {
+      expect(parseCommand('tz UTC0'), const SetTz('UTC0'));
+      expect(() => parseCommand('TZ'), throwsProtocolError('bad args'));
+      expect(() => parseCommand('TZ  '), throwsProtocolError('bad args'));
     });
 
     test('TEXT takes exactly a DD:DD shape', () {
@@ -149,6 +162,19 @@ void main() {
       expect(passwordError('trailing '), isNotNull);
       expect(passwordError('p' * 64), isNotNull);
       expect(passwordError('naïve'), isNotNull);
+    });
+  });
+
+  group('parseTimeUtc', () {
+    test('takes the UTC timestamp TIME replies with', () {
+      expect(
+        parseTimeUtc('2026-10-09T18:20:43Z GMT0BST,M3.5.0/1,M10.5.0'),
+        DateTime.utc(2026, 10, 9, 18, 20, 43),
+      );
+    });
+
+    test('anything else is a FormatException', () {
+      expect(() => parseTimeUtc('soon UTC0'), throwsFormatException);
     });
   });
 

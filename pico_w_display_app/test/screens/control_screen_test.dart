@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pico_w_display_app/screens/control_screen.dart';
@@ -9,8 +11,65 @@ void main() {
 
   setUp(() => link = FakeCommandLink());
 
-  Future<void> pumpScreen(WidgetTester tester) =>
-      tester.pumpWidget(MaterialApp(home: ControlScreen(link: link)));
+  /// With no [zone], the phone's zone never resolves, so no `TZ`/`TIME`
+  /// joins the queue ahead of what a test sends.
+  Future<void> pumpScreen(WidgetTester tester, {String? zone}) =>
+      tester.pumpWidget(
+        MaterialApp(
+          home: ControlScreen(
+            link: link,
+            zoneSource: zone == null
+                ? () => Completer<String>().future
+                : () async => zone,
+          ),
+        ),
+      );
+
+  /// Replies [line] to the oldest unanswered Command, then lets the
+  /// screen catch up: a TZ status lands a few async hops after its reply.
+  Future<void> reply(WidgetTester tester, String line) async {
+    link.reply('$line\n');
+    await tester.pump();
+    await tester.pump();
+  }
+
+  testWidgets('sends the phone\'s TZ Rule on connect, then TIME', (
+    tester,
+  ) async {
+    await pumpScreen(tester, zone: 'Europe/London');
+    await tester.pump();
+    expect(link.written, ['TZ GMT0BST,M3.5.0/1,M10.5.0']);
+
+    await reply(tester, 'OK');
+    expect(link.written.last, 'TIME');
+    await reply(tester, 'ERR not synced');
+
+    expect(find.text('Waiting for network time'), findsOneWidget);
+  });
+
+  testWidgets('shows the display\'s time once it has Synced', (tester) async {
+    await pumpScreen(tester, zone: 'Europe/London');
+    await tester.pump();
+    await reply(tester, 'OK');
+    await reply(tester, 'OK 2026-10-09T18:20:43Z GMT0BST,M3.5.0/1,M10.5.0');
+
+    expect(find.textContaining('Synced · '), findsOneWidget);
+  });
+
+  testWidgets('warns when the phone\'s zone is not in the table', (
+    tester,
+  ) async {
+    await pumpScreen(tester, zone: 'Mars/Olympus_Mons');
+    await tester.pump();
+    await reply(tester, 'OK');
+
+    expect(
+      find.textContaining(
+        'Timezone not supported: Mars/Olympus_Mons (using UTC',
+      ),
+      findsOneWidget,
+    );
+  });
 
   testWidgets('TEXT sends the entered text and shows the reply inline', (
     tester,

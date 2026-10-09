@@ -499,4 +499,15 @@ mod tests {
     fn local_ms_keeps_sub_second() {
         assert_eq!(rule("JST-9").local_ms(1_500), 9 * 3_600_000 + 1_500);
     }
+
+    /// Every distinct rule in the tz database the companion app can send
+    /// (`pico_w_display_app/tool/gen_tz_table.dart` writes the fixture).
+    #[test]
+    fn accepts_every_tz_database_rule() {
+        let rules = include_str!("../testdata/tz_rules.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'));
+        let rejected: std::vec::Vec<&str> = rules.filter(|r| TzRule::parse(r).is_none()).collect();
+        assert!(rejected.is_empty(), "rejected: {rejected:?}");
+    }
 }

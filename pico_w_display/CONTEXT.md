@@ -13,7 +13,7 @@ One client's connected lifetime on a Transport: read a command line, dispatch it
 _Avoid_: Connection, request
 
 **Command**:
-A parsed instruction a Session dispatches to the display loop: `TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `FORGET`, `UNPAIR`. Transport-agnostic — the display loop only ever sees a `Command`, never which Transport it arrived over.
+A parsed instruction a Session dispatches to the display loop: `TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `FORGET`, `UNPAIR`, `TZ`, `TIME`. Transport-agnostic — the display loop only ever sees a `Command`, never which Transport it arrived over.
 
 **Bond**:
 The persisted cryptographic pairing record (identity + LTK) that lets a previously-paired phone re-establish an encrypted BLE link with no user action. Exactly one Bond is stored at a time; a fresh pairing overwrites it.
