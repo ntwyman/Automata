@@ -133,9 +133,19 @@ impl SettingsStore {
         rule
     }
 
+    /// Whether flash holds exactly `rule`'s text. Unlike [`Self::load_tz`],
+    /// quiet: an unreadable or invalid record just doesn't match.
+    pub async fn holds_tz(&mut self, rule: &TzRule) -> bool {
+        matches!(
+            self.map.fetch_item::<&[u8]>(&mut self.buf, &(Key::Tz as u8)).await,
+            Ok(Some(text)) if text == rule.as_str().as_bytes()
+        )
+    }
+
     /// Persists `rule`, replacing any previous one. Like
     /// `bond_store::BondStore::save`, the flash write briefly glitches the
-    /// LED output and cyw43 SPI traffic — fine for a rare, user-sent `TZ`.
+    /// LED output and cyw43 SPI traffic — fine for a `TZ` that changes the
+    /// rule, which is rare ([`TzSetting`] skips unchanged ones).
     pub async fn save_tz(&mut self, rule: &TzRule) -> Result<(), &'static str> {
         let text = rule.as_str().as_bytes();
         match self.map.store_item(&mut self.buf, &(Key::Tz as u8), &text).await {
@@ -218,7 +228,13 @@ pub struct TzSetting<'a> {
 impl TzStore for TzSetting<'_> {
     async fn set(&mut self, rule: TzRule) -> Result<(), &'static str> {
         let mut store = self.store.lock().await;
-        store.save_tz(&rule).await?;
+        // The client re-sends the TZ Rule every Session, so spare the flash
+        // a rewrite (reads don't wear it) when it already holds this rule.
+        // Checked against flash rather than `TZ_RULE`, which is also empty
+        // when the boot load failed with an older rule still stored.
+        if !store.holds_tz(&rule).await {
+            store.save_tz(&rule).await?;
+        }
         // Published under the lock, so two Sessions' `TZ`s can't leave flash
         // holding one rule and `TZ_RULE` the other.
         TZ_RULE.sender().send(rule);
