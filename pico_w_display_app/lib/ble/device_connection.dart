@@ -21,7 +21,7 @@ class Connected extends LinkState {
 }
 
 /// A device is known but the link to it couldn't be opened or secured —
-/// out of range, powered off, or its Bond was cleared. The known device is
+/// out of range, powered off, or it was Factory Reset from elsewhere. The known device is
 /// kept; the user can retry or deliberately pair afresh.
 class Unreachable extends LinkState {
   const Unreachable(this.reason);
@@ -29,8 +29,7 @@ class Unreachable extends LinkState {
   final String reason;
 }
 
-/// Pairing: scanning for the device's advertisement during the Bondable
-/// Window.
+/// Pairing: scanning for the device's advertisement.
 class Scanning extends LinkState {
   const Scanning();
 }
@@ -58,11 +57,10 @@ class Reconnecting extends LinkState {
   const Reconnecting();
 }
 
-/// Mirrors the firmware's Bondable Window (`pairing_window.rs`, default 45s):
-/// a Pairing only yields a persisted Bond on the device if it completes
-/// within this long of the GP22 button press, so there's no point scanning
-/// for longer.
-const bondableWindow = Duration(seconds: 45);
+/// How long Pairing scans for the device before giving up. An Unclaimed
+/// device advertises until a phone Claims it, so this only bounds how long
+/// the app waits on one that's off or out of range.
+const pairingScanTimeout = Duration(seconds: 45);
 
 /// Owns the app's single device: decides at launch between Pairing and a
 /// direct reconnect, and exposes where that stands as [state].
@@ -92,16 +90,26 @@ class DeviceConnection {
   /// The known device is only replaced once a new Pairing succeeds.
   void choosePairing() => state.value = const NeedsPairing();
 
-  /// Runs Pairing: call once the user has pressed the device's button.
-  /// The device is only remembered once the link is encrypted, so an
+  /// Forgets the device after it has accepted a Factory Reset, and returns
+  /// to Pairing. The device reboots Unclaimed, so its dropping the link is
+  /// expected, not [Unreachable].
+  Future<void> forgetDevice() async {
+    final current = state.value;
+    await _store.clear();
+    state.value = const NeedsPairing();
+    if (current is Connected) await current.link.disconnect();
+  }
+
+  /// Runs Pairing: the first phone to pair with an Unclaimed device Claims
+  /// it. The device is only remembered once the link is encrypted, so an
   /// abandoned or refused Pairing leaves any previously known device as is.
   Future<void> pair() async {
     state.value = const Scanning();
     try {
-      final remoteId = await _central.scanForDevice(bondableWindow);
+      final remoteId = await _central.scanForDevice(pairingScanTimeout);
       if (remoteId == null) {
         state.value = const PairingFailed(
-          'No device found. Press its button and try again.',
+          'No display found. Check it is on and nearby, and try again.',
         );
         return;
       }

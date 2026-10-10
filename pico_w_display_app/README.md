@@ -1,6 +1,6 @@
 # pico_w_display_app
 
-Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, sends it Commands (`TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Bondable Window, …) follow `../pico_w_display/CONTEXT.md`.
+Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, sends it Commands (`TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `RESET`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Claimed, Factory Reset, …) follow `../pico_w_display/CONTEXT.md`.
 
 ## Layout
 
@@ -38,13 +38,13 @@ Never raise `flutter_blue_plus`'s log level to `LogLevel.verbose`: at that level
 
 ## Manual verification (Pairing)
 
-1. Fresh install, display powered: tap Pair within 45s of pressing the display's button. Accept the OS pairing request. The app shows Connected, and the firmware logs `ble pairing complete` with a persisted Bond.
+1. Fresh install, freshly reset display (Unclaimed): tap Pair, no button press. Accept the OS pairing request. The app shows Connected, and the firmware logs `ble pairing complete` then `claimed`.
 2. Kill and relaunch the app: it reconnects with no scan, no button press and no dialog.
 3. Power-cycle the display, relaunch: same as 2.
-4. Tap Pair *without* pressing the button first: Pairing may complete on the phone, but the display persists no Bond (ADR-0002's documented gap), so step 3 then fails.
+4. Pair a second phone with the now-Claimed display: Pairing may complete on that phone, but the display persists no Bond, so step 3 then fails for it. (Until the Link Key slice, that phone's transient link can still run Commands.)
 5. Repeat 1–3 on both a real iOS and a real Android device.
 
-If Pairing fails after the display was `UNPAIR`ed or paired with another phone, forget "Plasma 2350 W" in the phone's Bluetooth settings first — the phone otherwise keeps offering the stale keys.
+If Pairing fails after the display was Factory Reset or paired with another phone, forget "Plasma 2350 W" in the phone's Bluetooth settings first — the phone otherwise keeps offering the stale keys.
 
 ## Manual verification (control screen)
 
@@ -55,6 +55,14 @@ Against a real, bonded display:
 3. Brightness: drag and release the slider: the display dims/brightens, `OK`.
 4. Wi-Fi: a correct SSID/password → `OK <address>`. Then a deliberately wrong password → `ERR wifi join failed` (or `ERR wifi join timed out`), and the password field is cleared. Check `flutter run`'s console and the platform logs (`adb logcat` / Xcode console) contain no trace of either password.
 5. Power off the display while on the control screen: the banner and screen switch to "Paired · not connected"; Retry reconnects to the control screen.
+6. Device → Factory reset → Cancel: nothing is sent. Factory reset → Reset: `OK`, the app returns to Pairing, and the display restarts showing `--:--` in the boot color. After it restarts it has no Bond (forget "Plasma 2350 W" in the phone's Bluetooth settings, then step 1 of Pairing works again), doesn't Rejoin Wi-Fi, and `TIME` reports `UTC0`.
+
+## Manual verification (Button A)
+
+1. Hold A: a bar fills across the middle of the grid over 5s, then the display restarts, with the same result as step 6 above.
+2. Hold A for about 3s and let go: the bar disappears and the clock comes back; nothing is erased.
+3. Tap A: nothing happens.
+4. Press the BOOTSEL button (GP22) while the display is running: nothing happens.
 
 ## Manual verification (timezone)
 

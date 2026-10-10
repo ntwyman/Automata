@@ -104,18 +104,19 @@ class JoinWifi extends Command {
   String toString() => 'JoinWifi($ssid, <redacted>)';
 }
 
-/// Bare `UNPAIR`: clears the device's persisted Bond.
-class Unpair extends Command {
-  const Unpair();
+/// Bare `RESET`: replies `OK`, then the device erases its Bond, Saved
+/// Network and every other setting, and reboots Unclaimed.
+class FactoryReset extends Command {
+  const FactoryReset();
 
   @override
-  bool operator ==(Object other) => other is Unpair;
+  bool operator ==(Object other) => other is FactoryReset;
 
   @override
-  int get hashCode => (Unpair).hashCode;
+  int get hashCode => (FactoryReset).hashCode;
 
   @override
-  String toString() => 'Unpair()';
+  String toString() => 'FactoryReset()';
 }
 
 /// `TZ <posix>`: persists and applies a TZ Rule. Only the firmware checks
@@ -159,7 +160,7 @@ String encodeCommand(Command command) => switch (command) {
     'COLOR ${_hex(red)}${_hex(green)}${_hex(blue)}',
   SetBrightness(:final level) => 'BRIGHTNESS $level',
   JoinWifi(:final ssid, :final password) => 'WIFI $ssid $password',
-  Unpair() => 'UNPAIR',
+  FactoryReset() => 'RESET',
   SetTz(:final rule) => 'TZ $rule',
   QueryTime() => 'TIME',
 };
@@ -193,7 +194,8 @@ Command parseCommand(String line) {
     'COLOR' => _parseColor(rest.trim()),
     'BRIGHTNESS' => _parseBrightness(rest.trim()),
     'WIFI' => _parseWifi(rest.trim()),
-    'UNPAIR' => const Unpair(),
+    'RESET' =>
+      rest.trim().isEmpty ? const FactoryReset() : throw ProtocolError.badArgs,
     'TZ' => _parseTz(rest.trim()),
     'TIME' => const QueryTime(),
     _ => throw ProtocolError.unknownCommand,

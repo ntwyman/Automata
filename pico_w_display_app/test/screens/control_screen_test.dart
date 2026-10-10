@@ -8,8 +8,12 @@ import '../support/fake_command_link.dart';
 
 void main() {
   late FakeCommandLink link;
+  late int forgotten;
 
-  setUp(() => link = FakeCommandLink());
+  setUp(() {
+    link = FakeCommandLink();
+    forgotten = 0;
+  });
 
   /// With no [zone], the phone's zone never resolves, so no `TZ`/`TIME`
   /// joins the queue ahead of what a test sends.
@@ -18,6 +22,7 @@ void main() {
         MaterialApp(
           home: ControlScreen(
             link: link,
+            onFactoryReset: () async => forgotten++,
             zoneSource: zone == null
                 ? () => Completer<String>().future
                 : () async => zone,
@@ -156,5 +161,72 @@ void main() {
 
     expect(find.text('ERR wifi join failed'), findsOneWidget);
     expect(find.text('wrong pass'), findsNothing);
+  });
+
+  /// Scrolls to the Factory Reset button and taps it.
+  Future<void> tapFactoryReset(WidgetTester tester) async {
+    final button = find.widgetWithText(OutlinedButton, 'Factory reset');
+    await tester.scrollUntilVisible(
+      button,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    // Built, but possibly still under the bottom edge.
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+  }
+
+  /// Confirms the dialog. Not `pumpAndSettle`: the Sending… spinner never
+  /// settles, so it would run the clock out to the reply timeout.
+  Future<void> confirmReset(WidgetTester tester) async {
+    await tester.tap(find.widgetWithText(FilledButton, 'Reset'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  testWidgets('Factory reset asks first, and cancelling sends nothing', (
+    tester,
+  ) async {
+    await pumpScreen(tester);
+
+    await tapFactoryReset(tester);
+    expect(find.byType(AlertDialog), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(link.written, isEmpty);
+    expect(forgotten, 0);
+  });
+
+  testWidgets('a confirmed Factory reset sends RESET and forgets on OK', (
+    tester,
+  ) async {
+    await pumpScreen(tester);
+
+    await tapFactoryReset(tester);
+    await confirmReset(tester);
+    expect(link.written, ['RESET']);
+    expect(forgotten, 0);
+
+    await reply(tester, 'OK');
+    await tester.pumpAndSettle();
+
+    expect(forgotten, 1);
+  });
+
+  testWidgets('a Factory reset the display refuses forgets nothing', (
+    tester,
+  ) async {
+    await pumpScreen(tester);
+
+    await tapFactoryReset(tester);
+    await confirmReset(tester);
+    await reply(tester, 'ERR unknown command');
+    await tester.pumpAndSettle();
+
+    expect(forgotten, 0);
+    expect(find.text('ERR unknown command'), findsOneWidget);
   });
 }

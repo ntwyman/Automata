@@ -6,11 +6,12 @@
 //! the `embedded_io_async::Read`/`Write` traits it already expects, via
 //! [`BleReader`]/[`BleWriter`].
 //!
-//! Pairing is gated by the GP22 [`pairing_window::BondableWindow`] (ADR-0002):
-//! a connection is only made bondable if the window is armed, and a Bond
-//! produced inside it is persisted via [`bond_store::BondStore`] so a
-//! previously-bonded phone reconnects with zero button presses, surviving a
-//! power cycle.
+//! An Unclaimed device (no Bond) makes every connection bondable, and the
+//! first Pairing's Bond is persisted via [`BondStore`], Claiming it
+//! (ADR-0005) — so that phone reconnects with zero button presses,
+//! surviving a power cycle. A Claimed device makes no connection bondable,
+//! so no other phone can replace the Bond; only a Factory Reset does.
+//! Refusing those other phones' links outright comes with the Link Key.
 use core::cell::Cell;
 
 use defmt::{info, warn};
@@ -23,11 +24,10 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
-use pico_w_display::protocol::{self, TzStore, WallClock, WifiControl};
+use pico_w_display::protocol::{self, FactoryReset, TzStore, WallClock, WifiControl};
 use trouble_host::prelude::*;
 
-use crate::bond_store::{Bonds, BondStore};
-use crate::pairing_window::BondableWindow;
+use crate::bond_store::BondStore;
 
 /// [`CommandService`]'s UUID (`e3fcb01d-9492-4fa7-97db-63f3491b3f58` — a
 /// fresh random 128-bit UUID, not a standard GATT profile) as 16 bytes in
@@ -194,22 +194,22 @@ impl Write for BleWriter<'_> {
 /// `initial_bond` (loaded from flash by `main.rs` before this task starts)
 /// is registered with the stack immediately, so a previously-bonded phone
 /// can reconnect on the very first advertisement — no button press, even
-/// right after a power cycle. `window` gates whether new connections may
-/// bond at all; `bonds` is where a fresh in-window Bond gets persisted, and
-/// where `UNPAIR` (over either transport) signals this loop to evict its
-/// in-memory copy. `clock` answers `TIME`, and `tz` stores `TZ`.
+/// right after a power cycle. Without one the device is Unclaimed, and
+/// `bond_store` is where the Pairing that Claims it gets persisted.
+/// `clock` answers `TIME`, `tz` stores `TZ`, and `reset` starts `RESET`'s
+/// Factory Reset.
 // One parameter per thing a Session or the Bond lifecycle needs, each
 // already its own small handle; bundling them would only move the count.
 #[allow(clippy::too_many_arguments)]
-pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
+pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
     controller: BtController,
     display: &protocol::DisplayMailbox,
     mut wifi: J,
     clock: &C,
     mut tz: Z,
     initial_bond: Option<BondInformation>,
-    window: &BondableWindow,
-    mut bonds: Bonds<'_>,
+    bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
+    mut reset: F,
 ) {
     // Fixed rather than derived from the chip's real BT MAC (no accessor for
     // it is wired up here) — fine for a single-device-per-app product; matches
@@ -231,13 +231,9 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
     }))
     .unwrap();
 
-    // Tracks whichever identity is currently both persisted to flash and
-    // registered with `stack`, so a later, *different* phone bonding can
-    // evict it from `stack`'s own in-memory bond list — otherwise
-    // `add_bond_information` (see its doc comment) just accumulates one
-    // entry per distinct phone that's ever bonded this session, leaving an
-    // old phone still able to reconnect even though flash (and so the next
-    // power cycle) only ever remembers the newest one.
+    // The Claimed phone's identity, once there's a Bond: `None` means
+    // Unclaimed. Only ever goes from `None` to `Some` — a Factory Reset
+    // reboots rather than clearing it.
     let known_identity: Cell<Option<Identity>> = Cell::new(initial_bond.as_ref().map(|b| b.identity));
     if let Some(bond) = initial_bond {
         info!("restoring persisted bond: {}", bond);
@@ -248,39 +244,23 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
 
     join(ble_host_task(runner), async {
         loop {
-            // Racing `bonds.evict.wait()` alongside advertising (rather than
-            // only checking it once connected) means a same-session
-            // `UNPAIR` — over USB while no phone is connected, or over BLE
-            // from the currently-bonded phone itself once its connection
-            // ends — evicts the in-memory Bond without waiting for a power
-            // cycle. Accepted, low-probability gap: if `UNPAIR` lands in the
-            // same poll cycle as an in-flight `accept()` completing, `select`
-            // drops the `advertise` future and that connection attempt is
-            // lost; the phone just retries on the next advertisement.
-            match select(advertise(&mut peripheral, &server), bonds.evict.wait()).await {
-                Either::First(Ok(conn)) => {
+            match advertise(&mut peripheral, &server).await {
+                Ok(conn) => {
                     info!("ble connected");
                     // Must happen before any pairing traffic arrives (see
                     // `set_bondable`'s own doc comment) — right after accept
-                    // is the earliest point available. An unarmed window
-                    // still lets the connection encrypt, just not bond (see
-                    // ADR-0002's documented gap).
-                    let _ = conn.raw().set_bondable(window.is_armed());
+                    // is the earliest point available. A Claimed device's
+                    // link still encrypts, just doesn't bond (a transient
+                    // Pairing, until the Link Key slice refuses it).
+                    let _ = conn.raw().set_bondable(known_identity.get().is_none());
 
                     let rx: BleRxChannel = Channel::new();
                     let disconnected: Disconnected = Signal::new();
                     let command = &server.command_service.command;
                     let reply = &server.command_service.reply;
 
-                    let events_fut = gatt_events_task(
-                        &conn,
-                        command,
-                        &rx,
-                        &disconnected,
-                        bonds.store,
-                        &stack,
-                        &known_identity,
-                    );
+                    let events_fut =
+                        gatt_events_task(&conn, command, &rx, &disconnected, bond_store, &known_identity);
                     let reader = BleReader {
                         rx: &rx,
                         disconnected: &disconnected,
@@ -289,7 +269,7 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
                     };
                     let writer = BleWriter { conn: &conn, reply };
                     let session_fut = protocol::run_session(
-                        reader, writer, display, &mut wifi, &mut bonds, clock, &mut tz,
+                        reader, writer, display, &mut wifi, &mut reset, clock, &mut tz,
                     );
 
                     // `join`, not `select`: `session_fut` must run to its own
@@ -299,19 +279,9 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore>(
                     join(events_fut, session_fut).await;
                     info!("ble disconnected");
                 }
-                Either::First(Err(_)) => {
+                Err(_) => {
                     warn!("ble advertise error");
                     Timer::after(Duration::from_millis(500)).await;
-                }
-                Either::Second(()) => {
-                    // Flash is already clear by the time this fires (see
-                    // `Bonds::clear`); this just drops `stack`'s in-memory
-                    // copy so the evicted phone can't auto-reconnect for the
-                    // rest of this power cycle either.
-                    if let Some(identity) = known_identity.take() {
-                        let _ = stack.remove_bond_information(identity);
-                        info!("evicted in-memory bond after UNPAIR");
-                    }
                 }
             }
         }
@@ -383,7 +353,6 @@ async fn gatt_events_task(
     rx: &BleRxChannel,
     disconnected: &Disconnected,
     bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
-    stack: &Stack<'_, BtController, DefaultPacketPool>,
     known_identity: &Cell<Option<Identity>>,
 ) {
     loop {
@@ -395,25 +364,16 @@ async fn gatt_events_task(
             }
             GattConnectionEvent::PairingComplete { security_level, bond } => {
                 info!("ble pairing complete: {:?}", security_level);
-                // `bond` is only `Some` when the pairing happened inside an
-                // armed window (both sides bondable) — an unarmed pairing
-                // still completes (ADR-0002's documented gap) but leaves
-                // `bond: None`, so nothing gets persisted here.
-                if let Some(bond) = bond {
-                    // A *different* phone bonding must evict the old
-                    // identity from `stack`'s own in-memory list — flash
-                    // only ever holds the new one, but `stack` otherwise
-                    // keeps both, letting the old phone reconnect for the
-                    // rest of this power cycle. Same identity re-bonding
-                    // (e.g. re-pairing after an app-side "forget device")
-                    // just replaces in place, so there's nothing to evict.
-                    if let Some(previous) = known_identity.get()
-                        && !previous.match_identity(&bond.identity)
-                    {
-                        let _ = stack.remove_bond_information(previous);
-                    }
+                // `bond` is only `Some` when both sides were bondable, which
+                // `run` allows only while Unclaimed: this Pairing Claims the
+                // device. A Claimed device's Pairing still completes, with
+                // `bond: None`, and nothing gets persisted.
+                if let Some(bond) = bond
+                    && known_identity.get().is_none()
+                {
                     known_identity.set(Some(bond.identity));
                     bond_store.lock().await.save(&bond).await;
+                    info!("claimed");
                 }
             }
             GattConnectionEvent::PairingFailed(err) => {

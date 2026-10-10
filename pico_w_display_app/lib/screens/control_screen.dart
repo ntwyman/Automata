@@ -23,10 +23,15 @@ class ControlScreen extends StatefulWidget {
   const ControlScreen({
     super.key,
     required this.link,
+    required this.onFactoryReset,
     this.zoneSource = platformZone,
   });
 
   final BleLink link;
+
+  /// Called once the display has accepted `RESET` (replied `OK`), so the
+  /// app can forget it.
+  final Future<void> Function() onFactoryReset;
 
   /// Where the phone's timezone comes from; replaced in tests.
   final ZoneSource zoneSource;
@@ -43,6 +48,7 @@ class _ControlScreenState extends State<ControlScreen> {
   late final _colorSender = _Sender(_client);
   late final _brightnessSender = _Sender(_client);
   late final _wifiSender = _Sender(_client);
+  late final _resetSender = _Sender(_client);
 
   late final _tzUpdater = TzRuleUpdater(_client, zoneSource: widget.zoneSource);
   late final AppLifecycleListener _lifecycle;
@@ -65,6 +71,7 @@ class _ControlScreenState extends State<ControlScreen> {
       _colorSender,
       _brightnessSender,
       _wifiSender,
+      _resetSender,
     ]) {
       sender.dispose();
     }
@@ -107,6 +114,15 @@ class _ControlScreenState extends State<ControlScreen> {
           title: 'Wi-Fi',
           children: [_WifiControl(sender: _wifiSender)],
         ),
+        _Section(
+          title: 'Device',
+          children: [
+            _FactoryResetControl(
+              sender: _resetSender,
+              onReset: widget.onFactoryReset,
+            ),
+          ],
+        ),
       ],
     ),
   );
@@ -144,12 +160,17 @@ class _Sender {
 
   bool get busy => outcome.value is _Sending;
 
-  Future<void> send(Command command) async {
+  /// Sends [command] and returns its reply, or `null` if there wasn't one;
+  /// either way it's also left in [outcome].
+  Future<Reply?> send(Command command) async {
     outcome.value = const _Sending();
     try {
-      outcome.value = _Replied(await _client.send(command));
+      final reply = await _client.send(command);
+      outcome.value = _Replied(reply);
+      return reply;
     } catch (e) {
       outcome.value = _Failed(_describe(e));
+      return null;
     }
   }
 
@@ -645,4 +666,61 @@ class _WifiControlState extends State<_WifiControl> {
       ],
     ),
   );
+}
+
+/// `RESET`: Factory Resets the display back to Unclaimed, so it asks first. Once the
+/// display replies `OK`, [onReset] forgets it.
+class _FactoryResetControl extends StatelessWidget {
+  const _FactoryResetControl({required this.sender, required this.onReset});
+
+  final _Sender sender;
+  final Future<void> Function() onReset;
+
+  Future<void> _reset(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Factory reset the display?'),
+        content: const Text(
+          'It forgets this phone, its Wi-Fi network and its timezone, then '
+          'restarts. To use it again, pair it afresh.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (await sender.send(const FactoryReset()) is ReplyOk) await onReset();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = Theme.of(context).colorScheme.error;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: ValueListenableBuilder(
+            valueListenable: sender.outcome,
+            builder: (context, _, _) => OutlinedButton.icon(
+              onPressed: sender.busy ? null : () => _reset(context),
+              style: OutlinedButton.styleFrom(foregroundColor: error),
+              icon: const Icon(Icons.restart_alt),
+              label: const Text('Factory reset'),
+            ),
+          ),
+        ),
+        _OutcomeLine(sender),
+      ],
+    );
+  }
 }

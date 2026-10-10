@@ -73,6 +73,7 @@ class PicoWDisplayApp extends StatelessWidget {
           Connected(:final link) => ControlScreen(
             key: ObjectKey(link),
             link: link,
+            onFactoryReset: connection.forgetDevice,
           ),
         },
       ),

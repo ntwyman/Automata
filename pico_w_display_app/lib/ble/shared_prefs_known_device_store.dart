@@ -12,4 +12,7 @@ class SharedPrefsKnownDeviceStore implements KnownDeviceStore {
   @override
   Future<void> save(String remoteId) =>
       SharedPreferencesAsync().setString(_key, remoteId);
+
+  @override
+  Future<void> clear() => SharedPreferencesAsync().remove(_key);
 }

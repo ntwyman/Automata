@@ -1,10 +1,10 @@
 //! Flash-backed persistence for the single BLE [`BondInformation`] record
-//! (ticket #6 / ADR-0002 / `CONTEXT.md`'s Bond entry): `bt.rs` calls
-//! [`BondStore::load`] once at boot to re-register a previously-bonded
-//! phone, and [`BondStore::save`] whenever a Pairing inside the
-//! [`crate::pairing_window`] produces a fresh Bond, overwriting whatever was
-//! there before — there is only ever one. [`BondStore::clear`] (via
-//! [`Bonds`]) is the other side: the `UNPAIR` command (ticket #7).
+//! (ADR-0005 / `CONTEXT.md`'s Bond entry): `main.rs` calls
+//! [`BondStore::load`] once at boot so `bt.rs` can re-register a
+//! previously-bonded phone, and `bt.rs` calls [`BondStore::save`] when the
+//! Pairing that Claims an Unclaimed device produces its Bond — there is only
+//! ever one. [`BondStore::erase`] is the other side: a Factory Reset
+//! (`factory_reset.rs`).
 //!
 //! Backed by `sequential-storage`'s wear-levelled map over the `BOND_STORAGE`
 //! region `memory.x` reserves (4 x 4 KiB sectors). There's only ever one
@@ -12,9 +12,6 @@
 //! rotates the underlying sector on each write so no single sector takes all
 //! the wear.
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
 use sequential_storage::cache::{Cache, Uncached};
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
@@ -92,8 +89,8 @@ impl BondStore {
 
     /// Persists `bond`, overwriting any previously-stored Bond — there is
     /// only ever one. Call from `bt.rs`'s `PairingComplete { bond: Some(_) }`
-    /// handler, which only fires with `Some` when the pairing happened
-    /// inside an armed Bondable Window (both sides bondable).
+    /// handler, which only fires with `Some` while the device is Unclaimed
+    /// (both sides bondable).
     ///
     /// A brief (tens-of-ms, once per successful pairing) system-wide hiccup
     /// is expected here: `embassy_rp::flash`'s erase/write both run in a
@@ -111,54 +108,19 @@ impl BondStore {
         }
     }
 
-    /// Clears the persisted Bond, if any. Call from `UNPAIR`'s dispatch
-    /// (via [`Bonds`]); idempotent — clearing an already-empty store is not
-    /// an error.
-    pub async fn clear(&mut self) -> Result<(), &'static str> {
-        match self.map.remove_item(&mut self.buf, &()).await {
+    /// Erases the whole Bond region, for a Factory Reset. Like
+    /// [`BondStore::save`], briefly glitches the LED output and cyw43 SPI
+    /// traffic.
+    pub async fn erase(&mut self) -> Result<(), &'static str> {
+        match self.map.erase_all().await {
             Ok(()) => {
-                defmt::info!("bond cleared from flash");
+                defmt::info!("bond flash erased");
                 Ok(())
             }
             Err(_) => {
-                defmt::warn!("bond flash clear failed");
-                Err("flash clear failed")
+                defmt::warn!("bond flash erase failed");
+                Err("flash erase failed")
             }
         }
-    }
-}
-
-/// Signaled by [`Bonds::clear`] so `bt::run`'s connection loop evicts the
-/// Bond it's holding in memory (`known_identity`/`stack::
-/// remove_bond_information`) once `UNPAIR` has cleared it from flash.
-/// Eviction can't happen at the `UNPAIR` dispatch site itself (`usb.rs`'s or
-/// `bt.rs`'s own `run_session` call) because `stack` — and the in-memory
-/// Bond list it owns — lives entirely inside `bt::run`'s own local scope;
-/// this signal is the one thing shared between them.
-pub type UnpairSignal = Signal<CriticalSectionRawMutex, ()>;
-
-/// Implements [`pico_w_display::protocol::BondClear`] for `UNPAIR`, shared
-/// by both the USB and BLE `run_session` calls in `main.rs` — mirrors
-/// `wifi::SharedWifi`'s shape for the same reason: each transport's session
-/// holds its own `Bonds` handle so they can run concurrently without both
-/// needing a simultaneous `&mut BondStore`.
-#[derive(Clone, Copy)]
-pub struct Bonds<'a> {
-    pub store: &'a Mutex<CriticalSectionRawMutex, BondStore>,
-    pub evict: &'a UnpairSignal,
-}
-
-impl pico_w_display::protocol::BondClear for Bonds<'_> {
-    async fn clear(&mut self) -> Result<(), &'static str> {
-        let result = self.store.lock().await.clear().await;
-        // Only on success: `bt::run`'s eviction handler assumes flash is
-        // already clear by the time this fires (see its own comment), so
-        // signaling on a failed clear would evict the in-memory Bond while
-        // flash still holds the old record — an inconsistent state that
-        // would only self-heal on reboot.
-        if result.is_ok() {
-            self.evict.signal(());
-        }
-        result
     }
 }

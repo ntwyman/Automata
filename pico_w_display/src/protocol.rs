@@ -69,19 +69,17 @@ pub trait WifiControl {
 }
 
 /// What a transport needs to provide so [`run_session`] can dispatch
-/// `UNPAIR` without depending on any concrete Bond-storage or BLE-stack
-/// type. Mirrors [`WifiControl`]'s shape and the same reasoning: `UNPAIR` is a
-/// direct, awaited round-trip that has nothing to do with the display.
-#[allow(async_fn_in_trait)]
-pub trait BondClear {
-    /// Clears the persisted Bond (and evicts any in-memory counterpart),
-    /// returning a reason string that's safe to send straight back to a
-    /// client as `ERR <reason>` on failure.
-    async fn clear(&mut self) -> Result<(), &'static str>;
+/// `RESET` without depending on the flash stores or the reboot. Unlike
+/// `WIFI`/`FORGET` it's not a round-trip: `RESET` always replies `OK`, and
+/// only once that reply is written does the Session ask for the Factory
+/// Reset, which then erases flash and reboots on its own.
+pub trait FactoryReset {
+    /// Starts a Factory Reset. Returns at once; the reboot follows shortly.
+    fn request(&mut self);
 }
 
 /// What a transport needs to provide so [`run_session`] can answer `TIME`
-/// without depending on any concrete clock. Like `WIFI`/`UNPAIR`, `TIME` is
+/// without depending on any concrete clock. Like `WIFI`/`RESET`, `TIME` is
 /// answered directly and never reaches the display loop.
 pub trait WallClock {
     /// The current UTC time as Unix seconds, or `None` while Unsynced.
@@ -202,9 +200,9 @@ enum ParsedLine {
     /// Clear the Saved Network and leave the current one, handled directly
     /// in [`run_session`] like `Wifi`.
     Forget,
-    /// Clear the persisted Bond, handled directly in [`run_session`] like
-    /// `Wifi` since it has nothing to do with the grid.
-    Unpair,
+    /// Factory Reset, handled directly in [`run_session`] like `Wifi`
+    /// since it has nothing to do with the grid.
+    Reset,
     /// Report the Wall Clock's UTC and TZ Rule, handled directly in
     /// [`run_session`].
     Time,
@@ -252,8 +250,13 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         parse_wifi(rest)
     } else if cmd.eq_ignore_ascii_case("FORGET") {
         Ok(ParsedLine::Forget)
-    } else if cmd.eq_ignore_ascii_case("UNPAIR") {
-        Ok(ParsedLine::Unpair)
+    } else if cmd.eq_ignore_ascii_case("RESET") {
+        // Bare only: wiping the device is too drastic to guess at.
+        if rest.is_empty() {
+            Ok(ParsedLine::Reset)
+        } else {
+            Err(ProtocolError::BadArgs)
+        }
     } else if cmd.eq_ignore_ascii_case("TIME") {
         Ok(ParsedLine::Time)
     } else if cmd.eq_ignore_ascii_case("TZ") {
@@ -394,12 +397,12 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
 /// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiControl, U: BondClear, C: WallClock, Z: TzStore>(
+pub async fn run_session<R: Read, W: Write, J: WifiControl, F: FactoryReset, C: WallClock, Z: TzStore>(
     mut reader: R,
     mut writer: W,
     display: &DisplayMailbox,
     wifi: &mut J,
-    bond: &mut U,
+    factory_reset: &mut F,
     clock: &C,
     tz: &mut Z,
 ) {
@@ -415,6 +418,7 @@ pub async fn run_session<R: Read, W: Write, J: WifiControl, U: BondClear, C: Wal
         };
 
         let mut reply: String<MAX_REPLY_LEN> = String::new();
+        let mut reset = false;
         match outcome {
             Line::TooLong => {
                 let _ = reply.push_str("ERR line too long\n");
@@ -454,14 +458,10 @@ pub async fn run_session<R: Read, W: Write, J: WifiControl, U: BondClear, C: Wal
                             let _ = writeln!(reply, "ERR {}", reason);
                         }
                     },
-                    Ok(ParsedLine::Unpair) => match bond.clear().await {
-                        Ok(()) => {
-                            let _ = reply.push_str("OK\n");
-                        }
-                        Err(reason) => {
-                            let _ = writeln!(reply, "ERR {}", reason);
-                        }
-                    },
+                    Ok(ParsedLine::Reset) => {
+                        let _ = reply.push_str("OK\n");
+                        reset = true;
+                    }
                     Ok(ParsedLine::Time) => match clock.utc_now() {
                         Some(utc) => {
                             let _ = writeln!(
@@ -490,7 +490,14 @@ pub async fn run_session<R: Read, W: Write, J: WifiControl, U: BondClear, C: Wal
             }
         }
 
-        if writer.write_all(reply.as_bytes()).await.is_err() {
+        let written = writer.write_all(reply.as_bytes()).await;
+        // After the `OK` is written, so the client sees it before the
+        // reboot drops the link — but even if it couldn't be: the owner
+        // asked, and the reply is only a courtesy.
+        if reset {
+            factory_reset.request();
+        }
+        if written.is_err() {
             warn!("serial write failed, ending session");
             return;
         }
@@ -530,9 +537,9 @@ mod tests {
 
     /// Collects everything written to it into a caller-owned buffer, so the
     /// buffer is still readable once `run_session` (which takes the writer
-    /// by value) has returned.
+    /// by value) has returned, and by [`FakeReset`] while it runs.
     struct FakeWriter<'a> {
-        written: &'a mut std::vec::Vec<u8>,
+        written: &'a core::cell::RefCell<std::vec::Vec<u8>>,
     }
 
     impl embedded_io_async::ErrorType for FakeWriter<'_> {
@@ -541,7 +548,7 @@ mod tests {
 
     impl Write for FakeWriter<'_> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Infallible> {
-            self.written.extend_from_slice(buf);
+            self.written.borrow_mut().extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -584,16 +591,18 @@ mod tests {
         }
     }
 
-    /// A [`BondClear`] that returns a canned outcome, standing in for a real
-    /// bond-store/BLE-stack eviction — this is only about `run_session`'s
-    /// handling of the reply.
-    struct FakeBondClear {
-        outcome: Result<(), &'static str>,
+    /// A [`FactoryReset`] that records, for each request, everything the
+    /// Session had written by then — so a test can see the `OK` went first.
+    struct FakeReset<'a> {
+        written: &'a core::cell::RefCell<std::vec::Vec<u8>>,
+        requests: std::vec::Vec<std::string::String>,
     }
 
-    impl BondClear for FakeBondClear {
-        async fn clear(&mut self) -> Result<(), &'static str> {
-            self.outcome
+    impl FactoryReset for FakeReset<'_> {
+        fn request(&mut self) {
+            let written = self.written.borrow().clone();
+            self.requests
+                .push(std::string::String::from_utf8(written).expect("reply is always ASCII"));
         }
     }
 
@@ -640,46 +649,33 @@ mod tests {
     }
 
     /// [`run_bytes`] for input that's valid UTF-8, which is nearly all of it.
-    fn run(
-        input: &str,
-        wifi_outcome: Result<&'static str, &'static str>,
-        bond_outcome: Result<(), &'static str>,
-    ) -> std::string::String {
-        run_bytes(input.as_bytes(), wifi_outcome, bond_outcome)
+    fn run(input: &str, wifi_outcome: Result<&'static str, &'static str>) -> std::string::String {
+        run_bytes(input.as_bytes(), wifi_outcome)
     }
 
     /// Feeds raw `input` bytes through [`run_session`] and returns everything
-    /// it wrote back. A fake display task drains `display` and immediately
-    /// acks, standing in for `main.rs`'s real display loop; `select` (rather
-    /// than `join`) is used since that fake loop never terminates on its own
-    /// — only `run_session` reaching a clean close ends the pair.
-    fn run_bytes(
-        input: &[u8],
-        wifi_outcome: Result<&'static str, &'static str>,
-        bond_outcome: Result<(), &'static str>,
-    ) -> std::string::String {
-        run_with_clock(input, wifi_outcome, bond_outcome, None)
+    /// it wrote back.
+    fn run_bytes(input: &[u8], wifi_outcome: Result<&'static str, &'static str>) -> std::string::String {
+        run_with_clock(input, wifi_outcome, None)
     }
 
     /// [`run_bytes`] with the Wall Clock reading `utc` (`None`: Unsynced).
     fn run_with_clock(
         input: &[u8],
         wifi_outcome: Result<&'static str, &'static str>,
-        bond_outcome: Result<(), &'static str>,
         utc: Option<u64>,
     ) -> std::string::String {
-        run_with_tz(input, wifi_outcome, bond_outcome, utc, Ok(()))
+        run_with_tz(input, wifi_outcome, utc, Ok(()))
     }
 
     /// [`run_with_clock`] with `TZ` saves resolving to `tz_outcome`.
     fn run_with_tz(
         input: &[u8],
         wifi_outcome: Result<&'static str, &'static str>,
-        bond_outcome: Result<(), &'static str>,
         utc: Option<u64>,
         tz_outcome: Result<(), &'static str>,
     ) -> std::string::String {
-        run_with_wifi(input, FakeWifi::joining(wifi_outcome), bond_outcome, utc, tz_outcome)
+        run_session_with(input, FakeWifi::joining(wifi_outcome), utc, tz_outcome).0
     }
 
     /// [`run`] with `FORGET` resolving to `forget_outcome`.
@@ -688,28 +684,38 @@ mod tests {
             join_outcome: ok_wifi(),
             forget_outcome,
         };
-        run_with_wifi(input.as_bytes(), wifi, ok_bond(), None, Ok(()))
+        run_session_with(input.as_bytes(), wifi, None, Ok(())).0
     }
 
-    /// [`run_with_tz`] with every `WIFI`/`FORGET` handled by `wifi`.
-    fn run_with_wifi(
+    /// [`run`], also returning what had been written at each Factory Reset
+    /// request.
+    fn run_reset(input: &str) -> (std::string::String, std::vec::Vec<std::string::String>) {
+        run_session_with(input.as_bytes(), FakeWifi::joining(ok_wifi()), None, Ok(()))
+    }
+
+    /// Feeds raw `input` bytes through [`run_session`], with every
+    /// `WIFI`/`FORGET` handled by `wifi`, and returns everything it wrote
+    /// back plus [`FakeReset`]'s requests. A fake display task drains
+    /// `display` and immediately acks, standing in for `main.rs`'s real
+    /// display loop; `select` (rather than `join`) is used since that fake
+    /// loop never terminates on its own — only `run_session` reaching a
+    /// clean close ends the pair.
+    fn run_session_with(
         input: &[u8],
         mut wifi: FakeWifi,
-        bond_outcome: Result<(), &'static str>,
         utc: Option<u64>,
         tz_outcome: Result<(), &'static str>,
-    ) -> std::string::String {
+    ) -> (std::string::String, std::vec::Vec<std::string::String>) {
         let reader = FakeReader {
             bytes: input.to_vec(),
             pos: 0,
         };
-        let mut written = std::vec::Vec::new();
-        let writer = FakeWriter {
-            written: &mut written,
-        };
+        let written = core::cell::RefCell::new(std::vec::Vec::new());
+        let writer = FakeWriter { written: &written };
         let display = DisplayMailbox::new();
-        let mut bond = FakeBondClear {
-            outcome: bond_outcome,
+        let mut reset = FakeReset {
+            written: &written,
+            requests: std::vec::Vec::new(),
         };
 
         let clock = FakeClock::new(utc);
@@ -718,7 +724,7 @@ mod tests {
             outcome: tz_outcome,
         };
 
-        let session = run_session(reader, writer, &display, &mut wifi, &mut bond, &clock, &mut tz);
+        let session = run_session(reader, writer, &display, &mut wifi, &mut reset, &clock, &mut tz);
         let fake_display = async {
             loop {
                 display.receive().await;
@@ -727,62 +733,59 @@ mod tests {
         };
 
         pollster::block_on(select(session, fake_display));
-        std::string::String::from_utf8(written).expect("reply is always ASCII")
+        let replies = std::string::String::from_utf8(written.take()).expect("reply is always ASCII");
+        (replies, reset.requests)
     }
 
     fn ok_wifi() -> Result<&'static str, &'static str> {
         Ok("10.0.0.5")
     }
 
-    fn ok_bond() -> Result<(), &'static str> {
-        Ok(())
-    }
-
     #[test]
     fn text_valid() {
-        assert_eq!(run("TEXT 12:34\n", ok_wifi(), ok_bond()), "OK\n");
+        assert_eq!(run("TEXT 12:34\n", ok_wifi()), "OK\n");
     }
 
     #[test]
     fn text_malformed_wrong_length() {
-        assert_eq!(run("TEXT 1234\n", ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run("TEXT 1234\n", ok_wifi()), "ERR bad args\n");
     }
 
     #[test]
     fn text_malformed_bad_char() {
         assert_eq!(
-            run("TEXT ab:34\n", ok_wifi(), ok_bond()),
+            run("TEXT ab:34\n", ok_wifi()),
             "ERR unsupported char\n"
         );
     }
 
     #[test]
     fn clock_valid() {
-        assert_eq!(run("CLOCK\n", ok_wifi(), ok_bond()), "OK\n");
+        assert_eq!(run("CLOCK\n", ok_wifi()), "OK\n");
     }
 
     #[test]
     fn color_valid() {
-        assert_eq!(run("COLOR ff00aa\n", ok_wifi(), ok_bond()), "OK\n");
+        assert_eq!(run("COLOR ff00aa\n", ok_wifi()), "OK\n");
     }
 
     #[test]
     fn color_malformed_not_hex() {
         assert_eq!(
-            run("COLOR zzzzzz\n", ok_wifi(), ok_bond()),
+            run("COLOR zzzzzz\n", ok_wifi()),
             "ERR bad args\n"
         );
     }
 
     #[test]
     fn brightness_valid() {
-        assert_eq!(run("BRIGHTNESS 200\n", ok_wifi(), ok_bond()), "OK\n");
+        assert_eq!(run("BRIGHTNESS 200\n", ok_wifi()), "OK\n");
     }
 
     #[test]
     fn brightness_malformed_out_of_range() {
         assert_eq!(
-            run("BRIGHTNESS 999\n", ok_wifi(), ok_bond()),
+            run("BRIGHTNESS 999\n", ok_wifi()),
             "ERR bad args\n"
         );
     }
@@ -790,7 +793,7 @@ mod tests {
     #[test]
     fn wifi_valid_join_succeeds() {
         assert_eq!(
-            run("WIFI myssid mypassword\n", Ok("10.0.0.5"), ok_bond()),
+            run("WIFI myssid mypassword\n", Ok("10.0.0.5")),
             "OK 10.0.0.5\n"
         );
     }
@@ -800,8 +803,7 @@ mod tests {
         assert_eq!(
             run(
                 "WIFI myssid mypassword\n",
-                Err("wifi join failed"),
-                ok_bond()
+                Err("wifi join failed")
             ),
             "ERR wifi join failed\n"
         );
@@ -809,7 +811,7 @@ mod tests {
 
     #[test]
     fn wifi_malformed_missing_password() {
-        assert_eq!(run("WIFI myssid\n", ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run("WIFI myssid\n", ok_wifi()), "ERR bad args\n");
     }
 
     #[test]
@@ -817,7 +819,7 @@ mod tests {
         // 33 bytes: one over the 32-byte SSID bound `parse_wifi` documents.
         let ssid = "a".repeat(33);
         let line = std::format!("WIFI {ssid} mypassword\n");
-        assert_eq!(run(&line, ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
     }
 
     #[test]
@@ -825,7 +827,7 @@ mod tests {
         // 64 bytes: one over the 63-byte password bound `parse_wifi` documents.
         let password = "a".repeat(64);
         let line = std::format!("WIFI myssid {password}\n");
-        assert_eq!(run(&line, ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run(&line, ok_wifi()), "ERR bad args\n");
     }
 
     #[test]
@@ -847,23 +849,42 @@ mod tests {
     }
 
     #[test]
-    fn unpair_valid() {
-        assert_eq!(run("UNPAIR\n", ok_wifi(), ok_bond()), "OK\n");
+    fn reset_replies_ok_then_requests_factory_reset() {
+        let (replies, requests) = run_reset("RESET\n");
+        assert_eq!(replies, "OK\n");
+        assert_eq!(requests, ["OK\n"], "one request, after the OK was written");
     }
 
     #[test]
-    fn unpair_clear_fails() {
-        assert_eq!(
-            run("UNPAIR\n", ok_wifi(), Err("flash clear failed")),
-            "ERR flash clear failed\n"
-        );
+    fn reset_is_case_insensitive() {
+        assert_eq!(run_reset("reset\n").1.len(), 1);
+    }
+
+    #[test]
+    fn reset_with_args_is_bad_args_and_does_not_reset() {
+        let (replies, requests) = run_reset("RESET now\n");
+        assert_eq!(replies, "ERR bad args\n");
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn other_commands_do_not_reset() {
+        let (_, requests) = run_reset("CLOCK\nFORGET\nTIME\nBOGUS\n");
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn unpair_is_unknown_and_does_not_reset() {
+        let (replies, requests) = run_reset("UNPAIR\n");
+        assert_eq!(replies, "ERR unknown command\n");
+        assert!(requests.is_empty());
     }
 
     #[test]
     fn time_synced_replies_iso8601_utc() {
         // 2026-10-03T12:34:56Z.
         assert_eq!(
-            run_with_clock(b"TIME\n", ok_wifi(), ok_bond(), Some(1_791_030_896)),
+            run_with_clock(b"TIME\n", ok_wifi(), Some(1_791_030_896)),
             "OK 2026-10-03T12:34:56Z UTC0\n"
         );
     }
@@ -871,14 +892,14 @@ mod tests {
     #[test]
     fn time_is_case_insensitive() {
         assert_eq!(
-            run_with_clock(b"time\n", ok_wifi(), ok_bond(), Some(0)),
+            run_with_clock(b"time\n", ok_wifi(), Some(0)),
             "OK 1970-01-01T00:00:00Z UTC0\n"
         );
     }
 
     #[test]
     fn time_unsynced() {
-        assert_eq!(run("TIME\n", ok_wifi(), ok_bond()), "ERR not synced\n");
+        assert_eq!(run("TIME\n", ok_wifi()), "ERR not synced\n");
     }
 
     #[test]
@@ -887,7 +908,6 @@ mod tests {
             run_with_clock(
                 b"TZ PST8PDT,M3.2.0,M11.1.0\nTIME\n",
                 ok_wifi(),
-                ok_bond(),
                 Some(1_791_030_896)
             ),
             "OK\nOK 2026-10-03T12:34:56Z PST8PDT,M3.2.0,M11.1.0\n"
@@ -897,7 +917,7 @@ mod tests {
     #[test]
     fn tz_is_case_insensitive_but_rule_is_kept_verbatim() {
         assert_eq!(
-            run_with_clock(b"tz <+0530>-5:30\ntime\n", ok_wifi(), ok_bond(), Some(0)),
+            run_with_clock(b"tz <+0530>-5:30\ntime\n", ok_wifi(), Some(0)),
             "OK\nOK 1970-01-01T00:00:00Z <+0530>-5:30\n"
         );
     }
@@ -905,21 +925,21 @@ mod tests {
     #[test]
     fn tz_utc0_restores_utc() {
         assert_eq!(
-            run_with_clock(b"TZ EST5EDT\nTZ UTC0\nTIME\n", ok_wifi(), ok_bond(), Some(0)),
+            run_with_clock(b"TZ EST5EDT\nTZ UTC0\nTIME\n", ok_wifi(), Some(0)),
             "OK\nOK\nOK 1970-01-01T00:00:00Z UTC0\n"
         );
     }
 
     #[test]
     fn tz_bare_is_bad_args() {
-        assert_eq!(run("TZ\n", ok_wifi(), ok_bond()), "ERR bad args\n");
-        assert_eq!(run("TZ   \n", ok_wifi(), ok_bond()), "ERR bad args\n");
+        assert_eq!(run("TZ\n", ok_wifi()), "ERR bad args\n");
+        assert_eq!(run("TZ   \n", ok_wifi()), "ERR bad args\n");
     }
 
     #[test]
     fn tz_malformed_is_bad_tz_and_keeps_rule() {
         assert_eq!(
-            run_with_clock(b"TZ PST8PDT,M3.2.0\nTIME\n", ok_wifi(), ok_bond(), Some(0)),
+            run_with_clock(b"TZ PST8PDT,M3.2.0\nTIME\n", ok_wifi(), Some(0)),
             "ERR bad tz\nOK 1970-01-01T00:00:00Z UTC0\n"
         );
     }
@@ -927,7 +947,7 @@ mod tests {
     #[test]
     fn tz_day_of_year_form_is_bad_tz() {
         assert_eq!(
-            run("TZ <+0330>-3:30<+0430>,J79/24,J263/24\n", ok_wifi(), ok_bond()),
+            run("TZ <+0330>-3:30<+0430>,J79/24,J263/24\n", ok_wifi()),
             "ERR bad tz\n"
         );
     }
@@ -938,7 +958,6 @@ mod tests {
             run_with_tz(
                 b"TZ EST5\nTIME\n",
                 ok_wifi(),
-                ok_bond(),
                 Some(0),
                 Err("flash write failed")
             ),
@@ -953,20 +972,20 @@ mod tests {
         let expected = std::format!("OK\nOK 2026-10-03T12:34:56Z {rule}\n");
         assert_eq!(expected.len() - 3, MAX_REPLY_LEN);
         assert_eq!(
-            run_with_clock(input.as_bytes(), ok_wifi(), ok_bond(), Some(1_791_030_896)),
+            run_with_clock(input.as_bytes(), ok_wifi(), Some(1_791_030_896)),
             expected
         );
     }
 
     #[test]
     fn unknown_command() {
-        assert_eq!(run("BOGUS\n", ok_wifi(), ok_bond()), "ERR unknown command\n");
+        assert_eq!(run("BOGUS\n", ok_wifi()), "ERR unknown command\n");
     }
 
     #[test]
     fn non_ascii_color_args() {
         assert_eq!(
-            run_bytes(b"COLOR a\xe9\xe9b\n", ok_wifi(), ok_bond()),
+            run_bytes(b"COLOR a\xe9\xe9b\n", ok_wifi()),
             "ERR unsupported char\n"
         );
     }
@@ -975,7 +994,7 @@ mod tests {
     fn non_ascii_in_first_four_chars() {
         // Within the prefix `run_session` checks for `WIFI` before parsing.
         assert_eq!(
-            run_bytes(b"abc\xe9\n", ok_wifi(), ok_bond()),
+            run_bytes(b"abc\xe9\n", ok_wifi()),
             "ERR unsupported char\n"
         );
     }
@@ -983,7 +1002,7 @@ mod tests {
     #[test]
     fn non_ascii_line_then_valid_command() {
         assert_eq!(
-            run_bytes(b"abc\xe9\nCLOCK\n", ok_wifi(), ok_bond()),
+            run_bytes(b"abc\xe9\nCLOCK\n", ok_wifi()),
             "ERR unsupported char\nOK\n"
         );
     }
@@ -993,7 +1012,7 @@ mod tests {
         // The canned `Ok` join outcome would reply `OK 10.0.0.5` if the line
         // were parsed and dispatched.
         assert_eq!(
-            run_bytes(b"WIFI net p\xe9ss\n", ok_wifi(), ok_bond()),
+            run_bytes(b"WIFI net p\xe9ss\n", ok_wifi()),
             "ERR unsupported char\n"
         );
     }
@@ -1001,7 +1020,7 @@ mod tests {
     #[test]
     fn non_ascii_only_line() {
         assert_eq!(
-            run_bytes(b"\xe9\xe9\nCLOCK\n", ok_wifi(), ok_bond()),
+            run_bytes(b"\xe9\xe9\nCLOCK\n", ok_wifi()),
             "ERR unsupported char\nOK\n"
         );
     }
@@ -1013,7 +1032,7 @@ mod tests {
         line.extend(core::iter::repeat_n(0xe9, 60));
         line.push(b'\n');
         assert_eq!(
-            run_bytes(&line, ok_wifi(), ok_bond()),
+            run_bytes(&line, ok_wifi()),
             "ERR line too long\n"
         );
     }
@@ -1024,7 +1043,7 @@ mod tests {
         line.extend(core::iter::repeat_n(b'9', 200));
         line.push(b'\n');
         assert_eq!(
-            run_bytes(&line, ok_wifi(), ok_bond()),
+            run_bytes(&line, ok_wifi()),
             "ERR line too long\n"
         );
     }
@@ -1032,7 +1051,7 @@ mod tests {
     #[test]
     fn line_too_long() {
         let long_line = "TEXT ".to_string() + &"9".repeat(200) + "\n";
-        assert_eq!(run(&long_line, ok_wifi(), ok_bond()), "ERR line too long\n");
+        assert_eq!(run(&long_line, ok_wifi()), "ERR line too long\n");
     }
 
     // Concurrent Sessions: two `run_session`s and a fake display loop that
@@ -1187,13 +1206,17 @@ mod tests {
                     fail: client.fail_writes,
                 };
                 let mut wifi = FakeWifi::joining(ok_wifi());
-                let mut bond = FakeBondClear { outcome: ok_bond() };
+                let unused = core::cell::RefCell::default();
+                let mut reset = FakeReset {
+                    written: &unused,
+                    requests: std::vec::Vec::new(),
+                };
                 let clock = FakeClock::new(None);
                 let mut tz = FakeTzStore {
                     clock: &clock,
                     outcome: Ok(()),
                 };
-                run_session(reader, writer, display, &mut wifi, &mut bond, &clock, &mut tz).await;
+                run_session(reader, writer, display, &mut wifi, &mut reset, &clock, &mut tz).await;
                 log.borrow_mut().push(Event::Ended(id));
             }
         };

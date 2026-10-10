@@ -76,7 +76,7 @@ void main() {
     expect(store.id, 'AA:BB');
   });
 
-  test('Pairing finds the device within the Bondable Window, secures it, and remembers it', () async {
+  test('Pairing finds the device, secures it, and remembers it', () async {
     final link = central.deviceAt('CC:DD');
     central.advertising = 'CC:DD';
 
@@ -135,6 +135,26 @@ void main() {
   });
 
   test(
+    'forgetting the device after a Factory Reset returns to Pairing, for good',
+    () async {
+      store.id = 'AA:BB';
+      final link = central.deviceAt('AA:BB');
+      await connection.start();
+
+      await connection.forgetDevice();
+      // The device reboots, dropping the link: that's not Unreachable.
+      link.drop();
+      await pumpEventQueue();
+
+      expect(connection.state.value, isA<NeedsPairing>());
+      expect(link.disconnected, isTrue);
+      expect(store.id, isNull);
+      await connection.start();
+      expect(connection.state.value, isA<NeedsPairing>());
+    },
+  );
+
+  test(
     'a link that drops after connecting leaves the known device Unreachable',
     () async {
       store.id = 'AA:BB';
@@ -166,6 +186,9 @@ class InMemoryKnownDeviceStore implements KnownDeviceStore {
 
   @override
   Future<void> save(String remoteId) async => id = remoteId;
+
+  @override
+  Future<void> clear() async => id = null;
 }
 
 class FakeBleLink implements BleLink {

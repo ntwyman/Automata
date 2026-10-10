@@ -116,6 +116,11 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
         }
     }
 
+    /// The color glyphs (and the Factory Reset progress bar) are drawn in.
+    pub fn foreground(&self) -> RGB8 {
+        self.foreground
+    }
+
     pub fn set_foreground(&mut self, color: RGB8) {
         self.foreground = color;
     }

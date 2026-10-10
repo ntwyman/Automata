@@ -2,7 +2,8 @@
 //! persisted TZ Rule) on a 17x17 WS2812 LED grid, or whatever a client
 //! connected over USB serial or BLE asks for instead. See `protocol.rs` for
 //! the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
-//! `wifi.rs` for Rejoining the Saved Network.
+//! `wifi.rs` for Rejoining the Saved Network, and `factory_reset.rs` for the
+//! Factory Reset.
 
 #![no_std]
 #![no_main]
@@ -11,7 +12,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join5};
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either5, select5};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Input, Pull};
@@ -23,6 +24,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
+use pico_w_display::factory_reset_hold::Hold;
 use pico_w_display::tz::TzRule;
 use pico_w_display::{protocol, wall_clock};
 use smart_leds::colors;
@@ -31,11 +33,11 @@ use {defmt_rtt as _, panic_probe as _};
 
 mod bond_store;
 mod bt;
+mod factory_reset;
 mod flash;
 mod fonts;
 mod grid;
 mod ntp;
-mod pairing_window;
 mod settings;
 mod usb;
 mod wifi;
@@ -58,7 +60,15 @@ const DIGIT_Y: usize = 5;
 const DIGIT_COLS: [usize; 4] = [0, 4, 10, 14];
 const COLON_X: usize = 8;
 
-type DisplayGrid<'d> = grid::Grid<'d, 17, 289>;
+/// The grid's width (and height), in LEDs.
+const GRID_WIDTH: usize = 17;
+
+/// Button A's Factory Reset progress bar: three rows, vertically centred,
+/// filling left to right.
+const BAR_Y: usize = 7;
+const BAR_HEIGHT: usize = 3;
+
+type DisplayGrid<'d> = grid::Grid<'d, GRID_WIDTH, { GRID_WIDTH * GRID_WIDTH }>;
 
 /// What the grid is currently showing: the Wall Clock, or a client-set
 /// string held as its four digits (colon is implicit, same position always).
@@ -90,8 +100,23 @@ impl Frame {
     }
 }
 
-fn render(grid: &mut DisplayGrid, frame: Frame) {
+/// Draws `frame`, unless Button A is being held for a Factory Reset, in
+/// which case the hold's progress bar replaces it.
+fn render(grid: &mut DisplayGrid, frame: Frame, hold: Hold) {
     grid.clear();
+    let filled = match hold {
+        Hold::Idle => None,
+        Hold::Filling { filled } => Some(filled),
+        Hold::Complete => Some(GRID_WIDTH),
+    };
+    if let Some(filled) = filled {
+        for x in 0..filled {
+            for y in BAR_Y..BAR_Y + BAR_HEIGHT {
+                grid.set(x, y, grid.foreground());
+            }
+        }
+        return;
+    }
     for (i, cell) in frame.cells.iter().enumerate() {
         match cell {
             Some(d) => {
@@ -149,7 +174,7 @@ async fn main(spawner: Spawner) {
     let program = PioWs2812Program::new(&mut common);
     let ws2812 = PioWs2812::new(&mut common, sm0, p.DMA_CH0, Irqs, p.PIN_15, &program);
 
-    let mut grd = grid::Grid::<17, 289>::new(ws2812, grid::GridOrigin::TopRight);
+    let mut grd = DisplayGrid::new(ws2812, grid::GridOrigin::TopRight);
 
     grd.set_background(colors::BLACK);
     grd.set_foreground(colors::DARK_BLUE);
@@ -200,24 +225,19 @@ async fn main(spawner: Spawner) {
     // `initial_bond` (loaded above) lets a previously-bonded phone reconnect
     // on `bt::run`'s very first advertisement — even right after this
     // power-on — with no button press. `bond_store` itself is shared
-    // (rather than handed to `bt::run` outright) because a fresh pairing
-    // later in this same session also needs to write to it, and `UNPAIR`
-    // (over either transport) needs to clear it.
+    // (rather than handed to `bt::run` outright) because the Pairing that
+    // Claims an Unclaimed device also needs to write to it, and a Factory
+    // Reset needs to erase it.
     let bond_store_mutex: Mutex<CriticalSectionRawMutex, bond_store::BondStore> = Mutex::new(bond_store);
-    // Lets `UNPAIR`, dispatched from either transport's `run_session`, tell
-    // `bt::run`'s connection loop to evict its in-memory Bond — see
-    // `bond_store::UnpairSignal`'s doc comment for why that can't happen
-    // directly at the dispatch site.
-    let unpair_signal: bond_store::UnpairSignal = bond_store::UnpairSignal::new();
 
-    // GP22 (the board's BOOT/user button): pressing it arms the Bondable
-    // Window `bt::run` checks before allowing a new connection to bond (see
-    // `pairing_window`'s module docs and ADR-0002). No internal pull —
-    // ticket #4's hardware validation found the board already has an
-    // external one.
-    let button = Input::new(p.PIN_22, Pull::None);
-    let bondable_window = pairing_window::BondableWindow::new();
-    let pairing_window_fut = pairing_window::run(button, &bondable_window);
+    // Factory Reset: `RESET` from either Session, or a 5s hold of Button A
+    // (GP12, active low, with a pull-up in case the board has none),
+    // whose progress the display loop draws.
+    let factory_reset_signal = factory_reset::FactoryResetSignal::new();
+    let hold_signal = factory_reset::HoldSignal::new();
+    let button_a = Input::new(p.PIN_12, Pull::Up);
+    let button_fut = factory_reset::watch_button(button_a, &hold_signal, &factory_reset_signal);
+    let factory_reset_fut = factory_reset::run(&factory_reset_signal, &bond_store_mutex, &settings_mutex);
 
     // USB CDC-ACM serial port. All these buffers are plain locals, borrowed
     // for the rest of `main` rather than declared `'static` — nothing here is
@@ -234,10 +254,7 @@ async fn main(spawner: Spawner) {
 
     let protocol_fut = async {
         let mut wifi = shared_wifi;
-        let mut bonds = bond_store::Bonds {
-            store: &bond_store_mutex,
-            evict: &unpair_signal,
-        };
+        let mut reset = factory_reset::FactoryResetRequest(&factory_reset_signal);
         let mut tz = settings::TzSetting {
             store: &settings_mutex,
         };
@@ -249,7 +266,7 @@ async fn main(spawner: Spawner) {
                 &mut sender,
                 &display,
                 &mut wifi,
-                &mut bonds,
+                &mut reset,
                 &ntp::Clock,
                 &mut tz,
             )
@@ -268,11 +285,8 @@ async fn main(spawner: Spawner) {
             store: &settings_mutex,
         },
         initial_bond,
-        &bondable_window,
-        bond_store::Bonds {
-            store: &bond_store_mutex,
-            evict: &unpair_signal,
-        },
+        &bond_store_mutex,
+        factory_reset::FactoryResetRequest(&factory_reset_signal),
     );
 
     let display_fut = async {
@@ -281,14 +295,15 @@ async fn main(spawner: Spawner) {
         let mut boot_utc_ms: Option<u64> = None;
         let mut tz = settings::current_tz();
         let mut mode = DisplayMode::Clock;
-        let mut shown: Option<Frame> = None;
+        let mut hold = Hold::Idle;
+        let mut shown: Option<(Frame, Hold)> = None;
 
         loop {
             let (frame, next_change) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
-            if shown != Some(frame) {
-                render(&mut grd, frame);
+            if shown != Some((frame, hold)) {
+                render(&mut grd, frame, hold);
                 grd.update().await;
-                shown = Some(frame);
+                shown = Some((frame, hold));
             }
 
             let tick = async {
@@ -297,9 +312,17 @@ async fn main(spawner: Spawner) {
                     None => core::future::pending().await,
                 }
             };
-            match select4(tick, display.receive(), syncs.changed(), tz_changes.changed()).await {
-                Either4::First(()) => {}
-                Either4::Second(command) => {
+            match select5(
+                tick,
+                display.receive(),
+                syncs.changed(),
+                tz_changes.changed(),
+                hold_signal.wait(),
+            )
+            .await
+            {
+                Either5::First(()) => {}
+                Either5::Second(command) => {
                     match command {
                         protocol::Command::Clock => mode = DisplayMode::Clock,
                         protocol::Command::Text(s) => mode = DisplayMode::Text(text_digits(&s)),
@@ -309,21 +332,22 @@ async fn main(spawner: Spawner) {
                     // Always redrawn, even if the frame is unchanged (e.g.
                     // `COLOR`), and before the ack so `OK` means it's shown.
                     let (frame, _) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
-                    render(&mut grd, frame);
+                    render(&mut grd, frame, hold);
                     grd.update().await;
-                    shown = Some(frame);
+                    shown = Some((frame, hold));
 
                     display.ack().await;
                 }
-                Either4::Third(synced) => boot_utc_ms = Some(synced),
-                Either4::Fourth(rule) => tz = rule,
+                Either5::Third(synced) => boot_utc_ms = Some(synced),
+                Either5::Fourth(rule) => tz = rule,
+                Either5::Fifth(state) => hold = state,
             }
         }
     };
 
     join(
-        join5(usb_fut, protocol_fut, ble_fut, display_fut, pairing_window_fut),
-        rejoin_fut,
+        join5(usb_fut, protocol_fut, ble_fut, display_fut, button_fut),
+        join(rejoin_fut, factory_reset_fut),
     )
     .await;
 }

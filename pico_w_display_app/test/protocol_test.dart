@@ -13,7 +13,7 @@ void main() {
         encodeCommand(const JoinWifi('home', 'pass word')),
         'WIFI home pass word',
       );
-      expect(encodeCommand(const Unpair()), 'UNPAIR');
+      expect(encodeCommand(const FactoryReset()), 'RESET');
       expect(
         encodeCommand(const SetTz('PST8PDT,M3.2.0,M11.1.0')),
         'TZ PST8PDT,M3.2.0,M11.1.0',
@@ -29,7 +29,7 @@ void main() {
         SetBrightness(0),
         SetBrightness(255),
         JoinWifi('net', 'a b c'),
-        Unpair(),
+        FactoryReset(),
         SetTz('<+0530>-5:30'),
         QueryTime(),
       ];
@@ -43,7 +43,7 @@ void main() {
     test('accepts command names in any case and trims the line', () {
       expect(parseCommand('  clock \r'), const ResumeClock());
       expect(parseCommand('Text 12:34'), const SetText('12:34'));
-      expect(parseCommand('unpair'), const Unpair());
+      expect(parseCommand('reset'), const FactoryReset());
     });
 
     test('rejects unknown commands', () {
@@ -52,6 +52,14 @@ void main() {
         throwsProtocolError('unknown command'),
       );
       expect(() => parseCommand(''), throwsProtocolError('unknown command'));
+    });
+
+    test('RESET is bare only, and UNPAIR is gone', () {
+      expect(() => parseCommand('RESET now'), throwsProtocolError('bad args'));
+      expect(
+        () => parseCommand('UNPAIR'),
+        throwsProtocolError('unknown command'),
+      );
     });
 
     test('TZ needs a rule, which only the firmware validates', () {

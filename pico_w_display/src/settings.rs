@@ -202,6 +202,22 @@ impl SettingsStore {
         }
     }
 
+    /// Erases the whole settings region — every [`Key`], present or future —
+    /// for a Factory Reset. Like [`SettingsStore::save_tz`], briefly glitches
+    /// the LED output and cyw43 SPI traffic.
+    pub async fn erase(&mut self) -> Result<(), &'static str> {
+        match self.map.erase_all().await {
+            Ok(()) => {
+                info!("settings flash erased");
+                Ok(())
+            }
+            Err(_) => {
+                warn!("settings flash erase failed");
+                Err("flash erase failed")
+            }
+        }
+    }
+
     /// Clears the Saved Network. Idempotent: clearing when nothing is saved
     /// is not an error.
     pub async fn clear_network(&mut self) -> Result<(), &'static str> {
@@ -219,7 +235,7 @@ impl SettingsStore {
 }
 
 /// Implements [`TzStore`] for `TZ`, shared by both the USB and BLE
-/// `run_session` calls in `main.rs` — the same shape as `bond_store::Bonds`.
+/// `run_session` calls in `main.rs` — the same shape as `wifi::SharedWifi`.
 #[derive(Clone, Copy)]
 pub struct TzSetting<'a> {
     pub store: &'a Mutex<CriticalSectionRawMutex, SettingsStore>,

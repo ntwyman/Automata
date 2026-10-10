@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../ble/device_connection.dart';
 import '../ble/flutter_blue_central.dart' show deviceName;
 
-/// Walks the user through Pairing: press the device's button to open its
-/// Bondable Window, then scan, connect and accept the OS Pairing dialog.
+/// Walks the user through Pairing: scan, connect and accept the OS Pairing
+/// dialog. The first phone to pair with an Unclaimed display Claims it.
 class PairingScreen extends StatelessWidget {
   const PairingScreen({
     super.key,
@@ -26,18 +26,14 @@ class PairingScreen extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              '1. Press the button on the display.',
+              'Tap Pair and accept the pairing request.',
               style: theme.textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            Text(
-              'This lets a new phone pair for the next ${bondableWindow.inSeconds} seconds. '
-              'Pairing this phone replaces any phone paired before it.',
-            ),
-            const SizedBox(height: 24),
-            Text(
-              '2. Right away, tap Pair and accept the pairing request.',
-              style: theme.textTheme.titleMedium,
+            const Text(
+              'A new or reset display belongs to the first phone that pairs '
+              'with it. To pair a display that already belongs to a phone, '
+              'Factory Reset it first: hold its A button for 5 seconds.',
             ),
             const SizedBox(height: 24),
             ..._progress(theme),
@@ -56,7 +52,7 @@ class PairingScreen extends StatelessWidget {
       Text(reason, style: TextStyle(color: theme.colorScheme.error)),
       const SizedBox(height: 8),
       const Text(
-        'If this display was paired before (or was UNPAIRed), first forget '
+        'If this display was paired before (or was Factory Reset), first forget '
         '"$deviceName" in your phone\'s Bluetooth settings.',
       ),
       const SizedBox(height: 16),
