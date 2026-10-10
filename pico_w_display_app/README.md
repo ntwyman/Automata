@@ -1,12 +1,13 @@
 # pico_w_display_app
 
-Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, sends it Commands (`TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `RESET`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Claimed, Factory Reset, …) follow `../pico_w_display/CONTEXT.md`.
+Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, fetches its Link Key (`KEY`), sends it Commands (`TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `RESET`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Claimed, Factory Reset, …) follow `../pico_w_display/CONTEXT.md`.
 
 ## Layout
 
-- `lib/ble/device_connection.dart` — the app's single device: launch-time choice between Pairing and a direct reconnect, and the Pairing flow itself. Unit-tested against a fake radio in `test/ble/`.
+- `lib/ble/device_connection.dart` — the app's single device: launch-time choice between Pairing and a direct reconnect, the Pairing flow itself, and fetching the Link Key with `KEY` whenever a link comes up with none stored. Unit-tested against a fake radio in `test/ble/`.
 - `lib/ble/ble_central.dart` — the narrow BLE interface `DeviceConnection` drives; `flutter_blue_central.dart` implements it over `flutter_blue_plus`.
 - `lib/ble/*known_device_store.dart` — persists the paired device's remote ID (`shared_preferences`).
+- `lib/ble/*link_key_store.dart` — persists the Link Key in the OS keystore (`flutter_secure_storage`), never in `shared_preferences`.
 - `lib/protocol.dart` — the Command grammar as pure encode/parse functions (plus the input validators the control screen uses), mirroring `pico_w_display/src/protocol.rs`. Unit-tested in `test/protocol_test.dart`.
 - `lib/ble/command_client.dart` — sends Commands over a secured link and matches each `reply` notification to its Command. Unit-tested against a fake link.
 - `lib/tz/` — the phone's timezone as a TZ Rule. `tz_rules.dart` looks the IANA zone up in the generated `posix_table.g.dart`, with a fixed-offset fallback for zones it lacks; `tz_rule_updater.dart` sends `TZ` then `TIME` on every connect and on app resume (`TZ` only when the rule changed), and reports the outcome for the control screen's status line. Unit-tested in `test/tz/`.
@@ -43,6 +44,14 @@ Never raise `flutter_blue_plus`'s log level to `LogLevel.verbose`: at that level
 3. Power-cycle the display, relaunch: same as 2.
 4. Pair a second phone with the now-Claimed display: the display persists no Bond and disconnects it (the firmware logs `ble link is not the claimed phone's`), so the app shows Pairing failed and no Command gets through.
 5. Repeat 1–3 on both a real iOS and a real Android device.
+
+## Manual verification (Link Key)
+
+1. Claiming in step 1 of Pairing: the firmware logs `link key generated` then `claimed`, and the app sends `KEY` once (`recv: KEY` in the firmware log) and holds the key. Neither the firmware log nor the app's console shows the key.
+2. Relaunch: no `KEY` is sent, since the key is already stored.
+3. Power-cycle the display: it logs `restoring link key`, not `link key generated`.
+4. Over USB serial (`picocom`), `KEY` → `ERR not allowed`.
+5. Factory reset, then pair again: a new key is generated and fetched.
 
 If Pairing fails after the display was Factory Reset or paired with another phone, forget "Plasma 2350 W" in the phone's Bluetooth settings first — the phone otherwise keeps offering the stale keys.
 

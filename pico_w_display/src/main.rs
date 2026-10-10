@@ -2,8 +2,8 @@
 //! persisted TZ Rule) on a 17x17 WS2812 LED grid, or whatever a client
 //! connected over USB serial or BLE asks for instead. See `protocol.rs` for
 //! the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
-//! `wifi.rs` for Rejoining the Saved Network, and `factory_reset.rs` for the
-//! Factory Reset.
+//! `wifi.rs` for Rejoining the Saved Network, `link_key.rs` for the Link Key,
+//! and `factory_reset.rs` for the Factory Reset.
 
 #![no_std]
 #![no_main]
@@ -16,9 +16,10 @@ use embassy_futures::select::{Either5, select5};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Input, Pull};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, PIO0, PIO1, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, PIO0, PIO1, TRNG, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
+use embassy_rp::trng::{self, Trng};
 use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -37,6 +38,7 @@ mod factory_reset;
 mod flash;
 mod fonts;
 mod grid;
+mod link_key;
 mod ntp;
 mod settings;
 mod usb;
@@ -47,6 +49,7 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH3>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
+    TRNG_IRQ => trng::InterruptHandler<TRNG>;
 });
 
 // Display layout on 17x17 grid (digits are 3 wide x 6 tall):
@@ -207,8 +210,30 @@ async fn main(spawner: Spawner) {
         info!("restoring saved network: {}", network.ssid.as_str());
         wifi_dev.restore(network);
     }
+    let initial_link_key = settings_store.load_link_key().await;
+    if let Some(key) = initial_link_key {
+        info!("restoring link key");
+        link_key::publish(key);
+    }
     let settings_mutex: Mutex<CriticalSectionRawMutex, settings::SettingsStore> =
         Mutex::new(settings_store);
+
+    // The default `sample_count` (25) is the datasheet's fast setting, and
+    // on this board it failed the TRNG's health tests hundreds of times
+    // drawing one Link Key next to an active radio. 100 is the datasheet's
+    // suggestion for far fewer failures; a few ms more per Claim is nothing.
+    let mut trng_config = trng::Config::default();
+    trng_config.sample_count = 100;
+    let mut link_keys = link_key::LinkKeys {
+        trng: Trng::new(p.TRNG, Irqs, trng_config),
+        settings: &settings_mutex,
+    };
+    // Claimed but no Link Key: claimed by firmware from before Link Keys,
+    // or the Claim's key write failed. Every Claimed device has one.
+    if initial_bond.is_some() && initial_link_key.is_none() {
+        warn!("claimed with no link key");
+        link_keys.generate().await;
+    }
 
     // Shared rather than owned outright: the USB and BLE sessions and the
     // Rejoin supervisor below run concurrently, and each needs its own
@@ -264,11 +289,13 @@ async fn main(spawner: Spawner) {
             protocol::run_session(
                 &mut receiver,
                 &mut sender,
+                protocol::Transport::Usb,
                 &display,
                 &mut wifi,
                 &mut reset,
                 &ntp::Clock,
                 &mut tz,
+                &link_key::CurrentLinkKey,
             )
             .await;
             info!("serial client disconnected");
@@ -286,6 +313,7 @@ async fn main(spawner: Spawner) {
         },
         initial_bond,
         &bond_store_mutex,
+        &mut link_keys,
         factory_reset::FactoryResetRequest(&factory_reset_signal),
     );
 

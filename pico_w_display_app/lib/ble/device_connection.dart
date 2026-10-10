@@ -1,7 +1,10 @@
 import 'package:flutter/foundation.dart';
 
+import '../protocol.dart';
 import 'ble_central.dart';
+import 'command_client.dart';
 import 'known_device_store.dart';
+import 'link_key_store.dart';
 
 /// Where the app stands with its single device; drives which screen shows.
 sealed class LinkState {
@@ -63,12 +66,19 @@ class Reconnecting extends LinkState {
 const pairingScanTimeout = Duration(seconds: 45);
 
 /// Owns the app's single device: decides at launch between Pairing and a
-/// direct reconnect, and exposes where that stands as [state].
+/// direct reconnect, and exposes where that stands as [state]. Also holds
+/// the device's Link Key, fetching it with `KEY` whenever a link comes up
+/// and none is stored.
 class DeviceConnection {
-  DeviceConnection({required this._central, required this._store});
+  DeviceConnection({
+    required this._central,
+    required this._store,
+    required this._linkKeys,
+  });
 
   final BleCentral _central;
   final KnownDeviceStore _store;
+  final LinkKeyStore _linkKeys;
 
   final ValueNotifier<LinkState> state = ValueNotifier(const Starting());
 
@@ -80,7 +90,9 @@ class DeviceConnection {
     }
     state.value = const Reconnecting();
     try {
-      _adopt(await _openSecureLink(remoteId, pairing: false));
+      final link = await _openSecureLink(remoteId, pairing: false);
+      await _fetchLinkKeyIfMissing(link);
+      _adopt(link);
     } catch (e) {
       state.value = Unreachable(_describe(e));
     }
@@ -96,13 +108,16 @@ class DeviceConnection {
   Future<void> forgetDevice() async {
     final current = state.value;
     await _store.clear();
+    await _linkKeys.clear();
     state.value = const NeedsPairing();
     if (current is Connected) await current.link.disconnect();
   }
 
   /// Runs Pairing: the first phone to pair with an Unclaimed device Claims
-  /// it. The device is only remembered once the link is encrypted, so an
-  /// abandoned or refused Pairing leaves any previously known device as is.
+  /// it, and the app then fetches the Link Key that Claim generated. The
+  /// device is only remembered once the link is encrypted, so an abandoned
+  /// or refused Pairing leaves any previously known device (and its Link
+  /// Key) as is.
   Future<void> pair() async {
     state.value = const Scanning();
     try {
@@ -116,9 +131,36 @@ class DeviceConnection {
       state.value = const Securing();
       final link = await _openSecureLink(remoteId, pairing: true);
       await _store.save(remoteId);
+      // A new Claim means a new Link Key; any stored one is a previous
+      // device's, or from before a Factory Reset.
+      await _linkKeys.clear();
+      await _fetchLinkKeyIfMissing(link);
       _adopt(link);
     } catch (e) {
       state.value = PairingFailed(_describe(e));
+    }
+  }
+
+  /// Asks the device for its Link Key over [link] if none is stored. Done
+  /// before [_adopt], so this `KEY` is the only Command on the link. A
+  /// failure is not fatal: the link is still usable, and the next connect
+  /// asks again.
+  Future<void> _fetchLinkKeyIfMissing(BleLink link) async {
+    CommandClient? client;
+    try {
+      if (await _linkKeys.load() != null) return;
+      client = CommandClient(link);
+      // `ERR` (e.g. `not claimed`) leaves the key unfetched, as does a
+      // throw from the keystore, a timeout, a garbled reply or a drop.
+      if (await client.send(const FetchLinkKey()) case ReplyOk(
+        :final detail?,
+      )) {
+        await _linkKeys.save(parseLinkKey(detail));
+      }
+    } catch (_) {
+      // Not fatal; see above.
+    } finally {
+      client?.close();
     }
   }
 

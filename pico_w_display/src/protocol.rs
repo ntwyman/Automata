@@ -100,6 +100,25 @@ pub trait TzStore {
     async fn set(&mut self, rule: TzRule) -> Result<(), &'static str>;
 }
 
+/// Bytes in the Link Key (`CONTEXT.md`): 256 bits, so `KEY` replies with
+/// twice this many hex digits.
+pub const LINK_KEY_LEN: usize = 32;
+
+/// What a transport needs to provide so [`run_session`] can answer `KEY`.
+/// Like [`WallClock`], read directly and never sent to the display loop.
+pub trait LinkKeySource {
+    /// The Link Key, or `None` while the device is Unclaimed. Never log it.
+    fn link_key(&self) -> Option<[u8; LINK_KEY_LEN]>;
+}
+
+/// Which Transport a Session runs over. Every Command behaves the same on
+/// each, except `KEY`: the Link Key only ever leaves over BLE (ADR-0007).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Usb,
+    Ble,
+}
+
 /// Longest SSID 802.11 allows, and so `WIFI` accepts.
 pub const MAX_SSID_LEN: usize = 32;
 /// Longest WPA2/WPA3 passphrase, and so `WIFI` accepts.
@@ -119,6 +138,7 @@ pub const MAX_LINE_LEN: usize = 104;
 /// [`MAX_LINE_LEN`]: the BLE `reply` characteristic sizes its backing buffer
 /// off this bound.
 pub const MAX_REPLY_LEN: usize = "OK ".len() + "2026-10-03T12:34:56Z ".len() + MAX_TZ_LEN + 1;
+const _: () = assert!("OK ".len() + 2 * LINK_KEY_LEN + "\n".len() <= MAX_REPLY_LEN);
 
 /// The display loop's side of every Session: Sessions hand it [`Command`]s,
 /// and it acks each once applied so the Session knows when it's safe to
@@ -208,6 +228,9 @@ enum ParsedLine {
     Time,
     /// Persist and apply a TZ Rule, handled directly in [`run_session`].
     Tz(TzRule),
+    /// Report the Link Key, handled directly in [`run_session`], and only
+    /// over BLE.
+    Key,
 }
 
 #[derive(defmt::Format)]
@@ -216,6 +239,7 @@ enum ProtocolError {
     BadArgs,
     UnsupportedChar,
     BadTz,
+    NotAllowed,
 }
 
 impl ProtocolError {
@@ -225,6 +249,7 @@ impl ProtocolError {
             ProtocolError::BadArgs => "bad args",
             ProtocolError::UnsupportedChar => "unsupported char",
             ProtocolError::BadTz => "bad tz",
+            ProtocolError::NotAllowed => "not allowed",
         }
     }
 }
@@ -261,6 +286,12 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         Ok(ParsedLine::Time)
     } else if cmd.eq_ignore_ascii_case("TZ") {
         parse_tz(rest)
+    } else if cmd.eq_ignore_ascii_case("KEY") {
+        if rest.is_empty() {
+            Ok(ParsedLine::Key)
+        } else {
+            Err(ProtocolError::BadArgs)
+        }
     } else {
         Err(ProtocolError::UnknownCommand)
     }
@@ -396,15 +427,29 @@ async fn read_line<R: Read>(reader: &mut R, buf: &mut String<MAX_LINE_LEN>) -> R
 /// commands to the display loop over `display`, waits for the display to
 /// apply each, and writes back `OK`/`ERR`. Returns once the
 /// transport errors or closes (e.g. USB disconnect), so the caller can wait
-/// for a new connection and call this again.
-pub async fn run_session<R: Read, W: Write, J: WifiControl, F: FactoryReset, C: WallClock, Z: TzStore>(
+/// for a new connection and call this again. `transport` is which Transport
+/// `reader`/`writer` are, and matters only to `KEY`.
+// One parameter per thing a Command needs, each its own small handle;
+// bundling them would only move the count.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session<
+    R: Read,
+    W: Write,
+    J: WifiControl,
+    F: FactoryReset,
+    C: WallClock,
+    Z: TzStore,
+    K: LinkKeySource,
+>(
     mut reader: R,
     mut writer: W,
+    transport: Transport,
     display: &DisplayMailbox,
     wifi: &mut J,
     factory_reset: &mut F,
     clock: &C,
     tz: &mut Z,
+    link_key: &K,
 ) {
     let mut line: String<MAX_LINE_LEN> = String::new();
     loop {
@@ -481,6 +526,22 @@ pub async fn run_session<R: Read, W: Write, J: WifiControl, F: FactoryReset, C: 
                         }
                         Err(reason) => {
                             let _ = writeln!(reply, "ERR {}", reason);
+                        }
+                    },
+                    // The reply is never logged, so the key stays off RTT.
+                    Ok(ParsedLine::Key) if transport != Transport::Ble => {
+                        let _ = writeln!(reply, "ERR {}", ProtocolError::NotAllowed.reason());
+                    }
+                    Ok(ParsedLine::Key) => match link_key.link_key() {
+                        Some(key) => {
+                            let _ = reply.push_str("OK ");
+                            for byte in key {
+                                let _ = write!(reply, "{:02x}", byte);
+                            }
+                            let _ = reply.push('\n');
+                        }
+                        None => {
+                            let _ = reply.push_str("ERR not claimed\n");
                         }
                     },
                     Err(e) => {
@@ -648,6 +709,27 @@ mod tests {
         }
     }
 
+    /// A [`LinkKeySource`] holding a canned Link Key, or none (Unclaimed).
+    struct FakeLinkKey(Option<[u8; LINK_KEY_LEN]>);
+
+    impl LinkKeySource for FakeLinkKey {
+        fn link_key(&self) -> Option<[u8; LINK_KEY_LEN]> {
+            self.0
+        }
+    }
+
+    /// A Link Key whose hex form shows the byte order and both nibbles.
+    const KEY: [u8; LINK_KEY_LEN] = {
+        let mut key = [0u8; LINK_KEY_LEN];
+        let mut i = 0;
+        while i < LINK_KEY_LEN {
+            key[i] = (i as u8) * 8 + 1;
+            i += 1;
+        }
+        key
+    };
+    const KEY_HEX: &str = "0109111921293139414951596169717981899199a1a9b1b9c1c9d1d9e1e9f1f9";
+
     /// [`run_bytes`] for input that's valid UTF-8, which is nearly all of it.
     fn run(input: &str, wifi_outcome: Result<&'static str, &'static str>) -> std::string::String {
         run_bytes(input.as_bytes(), wifi_outcome)
@@ -675,7 +757,7 @@ mod tests {
         utc: Option<u64>,
         tz_outcome: Result<(), &'static str>,
     ) -> std::string::String {
-        run_session_with(input, FakeWifi::joining(wifi_outcome), utc, tz_outcome).0
+        run_session_with(input, FakeWifi::joining(wifi_outcome), utc, tz_outcome, Transport::Ble, None).0
     }
 
     /// [`run`] with `FORGET` resolving to `forget_outcome`.
@@ -684,17 +766,23 @@ mod tests {
             join_outcome: ok_wifi(),
             forget_outcome,
         };
-        run_session_with(input.as_bytes(), wifi, None, Ok(())).0
+        run_session_with(input.as_bytes(), wifi, None, Ok(()), Transport::Ble, None).0
     }
 
     /// [`run`], also returning what had been written at each Factory Reset
     /// request.
     fn run_reset(input: &str) -> (std::string::String, std::vec::Vec<std::string::String>) {
-        run_session_with(input.as_bytes(), FakeWifi::joining(ok_wifi()), None, Ok(()))
+        run_session_with(input.as_bytes(), FakeWifi::joining(ok_wifi()), None, Ok(()), Transport::Ble, None)
     }
 
-    /// Feeds raw `input` bytes through [`run_session`], with every
-    /// `WIFI`/`FORGET` handled by `wifi`, and returns everything it wrote
+    /// [`run`] over `transport`, with `key` as the Link Key.
+    fn run_key(input: &str, transport: Transport, key: Option<[u8; LINK_KEY_LEN]>) -> std::string::String {
+        run_session_with(input.as_bytes(), FakeWifi::joining(ok_wifi()), None, Ok(()), transport, key).0
+    }
+
+    /// Feeds raw `input` bytes through [`run_session`] over `transport`, with
+    /// every `WIFI`/`FORGET` handled by `wifi` and `key` as the Link Key, and
+    /// returns everything it wrote
     /// back plus [`FakeReset`]'s requests. A fake display task drains
     /// `display` and immediately acks, standing in for `main.rs`'s real
     /// display loop; `select` (rather than `join`) is used since that fake
@@ -705,6 +793,8 @@ mod tests {
         mut wifi: FakeWifi,
         utc: Option<u64>,
         tz_outcome: Result<(), &'static str>,
+        transport: Transport,
+        key: Option<[u8; LINK_KEY_LEN]>,
     ) -> (std::string::String, std::vec::Vec<std::string::String>) {
         let reader = FakeReader {
             bytes: input.to_vec(),
@@ -724,7 +814,10 @@ mod tests {
             outcome: tz_outcome,
         };
 
-        let session = run_session(reader, writer, &display, &mut wifi, &mut reset, &clock, &mut tz);
+        let key = FakeLinkKey(key);
+        let session = run_session(
+            reader, writer, transport, &display, &mut wifi, &mut reset, &clock, &mut tz, &key,
+        );
         let fake_display = async {
             loop {
                 display.receive().await;
@@ -978,6 +1071,56 @@ mod tests {
     }
 
     #[test]
+    fn key_over_ble_replies_hex_link_key() {
+        assert_eq!(
+            run_key("KEY\n", Transport::Ble, Some(KEY)),
+            std::format!("OK {KEY_HEX}\n")
+        );
+    }
+
+    #[test]
+    fn key_reply_fits() {
+        assert!(std::format!("OK {KEY_HEX}\n").len() <= MAX_REPLY_LEN);
+    }
+
+    #[test]
+    fn key_is_case_insensitive() {
+        assert_eq!(
+            run_key("key\n", Transport::Ble, Some(KEY)),
+            std::format!("OK {KEY_HEX}\n")
+        );
+    }
+
+    #[test]
+    fn key_with_args_is_bad_args() {
+        assert_eq!(run_key("KEY please\n", Transport::Ble, Some(KEY)), "ERR bad args\n");
+    }
+
+    #[test]
+    fn key_unclaimed_is_not_claimed() {
+        assert_eq!(run_key("KEY\n", Transport::Ble, None), "ERR not claimed\n");
+    }
+
+    #[test]
+    fn key_off_ble_is_not_allowed() {
+        assert_eq!(run_key("KEY\n", Transport::Usb, Some(KEY)), "ERR not allowed\n");
+    }
+
+    #[test]
+    fn key_off_ble_with_args_is_still_bad_args() {
+        // Parse errors come first, whatever the Transport.
+        assert_eq!(run_key("KEY x\n", Transport::Usb, Some(KEY)), "ERR bad args\n");
+    }
+
+    #[test]
+    fn other_commands_work_off_ble() {
+        assert_eq!(
+            run_key("CLOCK\nKEY\nTZ EST5\n", Transport::Usb, Some(KEY)),
+            "OK\nERR not allowed\nOK\n"
+        );
+    }
+
+    #[test]
     fn unknown_command() {
         assert_eq!(run("BOGUS\n", ok_wifi()), "ERR unknown command\n");
     }
@@ -1216,7 +1359,18 @@ mod tests {
                     clock: &clock,
                     outcome: Ok(()),
                 };
-                run_session(reader, writer, display, &mut wifi, &mut reset, &clock, &mut tz).await;
+                run_session(
+                    reader,
+                    writer,
+                    Transport::Ble,
+                    display,
+                    &mut wifi,
+                    &mut reset,
+                    &clock,
+                    &mut tz,
+                    &FakeLinkKey(None),
+                )
+                .await;
                 log.borrow_mut().push(Event::Ended(id));
             }
         };

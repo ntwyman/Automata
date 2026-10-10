@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'ble/device_connection.dart';
 import 'ble/flutter_blue_central.dart';
+import 'ble/secure_link_key_store.dart';
 import 'ble/shared_prefs_known_device_store.dart';
 import 'screens/control_screen.dart';
 import 'screens/link_banner.dart';
@@ -11,6 +12,7 @@ void main() {
   final connection = DeviceConnection(
     central: FlutterBlueCentral(),
     store: SharedPrefsKnownDeviceStore(),
+    linkKeys: SecureLinkKeyStore(),
   );
   runApp(PicoWDisplayApp(connection: connection));
   connection.start();

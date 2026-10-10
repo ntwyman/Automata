@@ -8,14 +8,16 @@
 //!
 //! An Unclaimed device (no Bond) makes every connection bondable, and the
 //! first Pairing's Bond is persisted via [`BondStore`], Claiming it
-//! (ADR-0005) — so that phone reconnects with zero button presses,
+//! (ADR-0005) and generating its Link Key ([`LinkKeys`]) — so that phone
+//! reconnects with zero button presses,
 //! surviving a power cycle. A Claimed device makes no connection bondable,
 //! so no other phone can replace the Bond; only a Factory Reset does.
 //!
 //! Only the Claimed phone may send Commands ([`LinkGuard`]): a link
 //! encrypted with the stored Bond, or the one whose Pairing just Claimed
 //! the device. Any other link is disconnected before a Command reaches its
-//! Session.
+//! Session. Sessions here run over [`Transport::Ble`], the only Transport
+//! `KEY` answers on.
 use core::cell::Cell;
 
 use defmt::{info, warn};
@@ -29,10 +31,11 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
 use pico_w_display::link_guard::{LinkEvent, LinkGuard, Verdict};
-use pico_w_display::protocol::{self, FactoryReset, TzStore, WallClock, WifiControl};
+use pico_w_display::protocol::{self, FactoryReset, Transport, TzStore, WallClock, WifiControl};
 use trouble_host::prelude::*;
 
 use crate::bond_store::BondStore;
+use crate::link_key::{CurrentLinkKey, LinkKeys};
 
 /// [`CommandService`]'s UUID (`e3fcb01d-9492-4fa7-97db-63f3491b3f58` — a
 /// fresh random 128-bit UUID, not a standard GATT profile) as 16 bytes in
@@ -200,9 +203,9 @@ impl Write for BleWriter<'_> {
 /// is registered with the stack immediately, so a previously-bonded phone
 /// can reconnect on the very first advertisement — no button press, even
 /// right after a power cycle. Without one the device is Unclaimed, and
-/// `bond_store` is where the Pairing that Claims it gets persisted.
-/// `clock` answers `TIME`, `tz` stores `TZ`, and `reset` starts `RESET`'s
-/// Factory Reset.
+/// `bond_store` is where the Pairing that Claims it gets persisted, and
+/// `link_keys` makes that Claim's Link Key. `clock` answers `TIME`, `tz`
+/// stores `TZ`, and `reset` starts `RESET`'s Factory Reset.
 // One parameter per thing a Session or the Bond lifecycle needs, each
 // already its own small handle; bundling them would only move the count.
 #[allow(clippy::too_many_arguments)]
@@ -214,6 +217,7 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
     mut tz: Z,
     initial_bond: Option<BondInformation>,
     bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
+    link_keys: &mut LinkKeys<'_>,
     mut reset: F,
 ) {
     // Fixed rather than derived from the chip's real BT MAC (no accessor for
@@ -264,8 +268,15 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
                     let command = &server.command_service.command;
                     let reply = &server.command_service.reply;
 
-                    let events_fut =
-                        gatt_events_task(&conn, command, &rx, &disconnected, bond_store, &known_identity);
+                    let events_fut = gatt_events_task(
+                        &conn,
+                        command,
+                        &rx,
+                        &disconnected,
+                        bond_store,
+                        &mut *link_keys,
+                        &known_identity,
+                    );
                     let reader = BleReader {
                         rx: &rx,
                         disconnected: &disconnected,
@@ -274,7 +285,15 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
                     };
                     let writer = BleWriter { conn: &conn, reply };
                     let session_fut = protocol::run_session(
-                        reader, writer, display, &mut wifi, &mut reset, clock, &mut tz,
+                        reader,
+                        writer,
+                        Transport::Ble,
+                        display,
+                        &mut wifi,
+                        &mut reset,
+                        clock,
+                        &mut tz,
+                        &CurrentLinkKey,
                     );
 
                     // `join`, not `select`: `session_fut` must run to its own
@@ -353,12 +372,17 @@ async fn advertise<'values, 'server, C: Controller>(
 /// `protocol::read_line` expects one command per terminated line) and
 /// answers every GATT request, until the connection drops. Any other link
 /// is disconnected, per [`LinkGuard`], and its writes refused.
+///
+/// The Pairing that Claims the device persists its Bond and generates its
+/// Link Key before the link may send Commands, so a `KEY` on it never
+/// finds the device without one.
 async fn gatt_events_task(
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     command: &Characteristic<Vec<u8, CMD_LEN>>,
     rx: &BleRxChannel,
     disconnected: &Disconnected,
     bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
+    link_keys: &mut LinkKeys<'_>,
     known_identity: &Cell<Option<Identity>>,
 ) {
     let mut guard = LinkGuard::new();
@@ -397,6 +421,7 @@ async fn gatt_events_task(
                     Some(bond) if known_identity.get().is_none() => {
                         known_identity.set(Some(bond.identity));
                         bond_store.lock().await.save(&bond).await;
+                        link_keys.generate().await;
                         info!("claimed");
                         true
                     }

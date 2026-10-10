@@ -37,6 +37,7 @@ dependencies:
   flutter_blue_plus: ^2.3.13
   shared_preferences: ^2.5.5
   flutter_timezone: ^5.1.1
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:

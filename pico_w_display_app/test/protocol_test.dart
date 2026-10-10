@@ -19,6 +19,7 @@ void main() {
         'TZ PST8PDT,M3.2.0,M11.1.0',
       );
       expect(encodeCommand(const QueryTime()), 'TIME');
+      expect(encodeCommand(const FetchLinkKey()), 'KEY');
     });
 
     test('every encoded Command parses back to itself', () {
@@ -32,6 +33,7 @@ void main() {
         FactoryReset(),
         SetTz('<+0530>-5:30'),
         QueryTime(),
+        FetchLinkKey(),
       ];
       for (final command in commands) {
         expect(parseCommand(encodeCommand(command)), command);
@@ -60,6 +62,11 @@ void main() {
         () => parseCommand('UNPAIR'),
         throwsProtocolError('unknown command'),
       );
+    });
+
+    test('KEY is bare only', () {
+      expect(parseCommand('key'), const FetchLinkKey());
+      expect(() => parseCommand('KEY x'), throwsProtocolError('bad args'));
     });
 
     test('TZ needs a rule, which only the firmware validates', () {
@@ -205,6 +212,36 @@ void main() {
       expect(() => parseReply('HELLO'), throwsFormatException);
       expect(() => parseReply('OKAY'), throwsFormatException);
       expect(() => parseReply(''), throwsFormatException);
+    });
+  });
+
+  group('parseLinkKey', () {
+    const hex =
+        '0109111921293139414951596169717981899199a1a9b1b9c1c9d1d9e1e9f1f9';
+
+    test('takes 64 hex digits, normalized to lowercase', () {
+      expect(parseLinkKey(hex).hex, hex);
+      expect(parseLinkKey(hex.toUpperCase()), parseLinkKey(hex));
+    });
+
+    test('rejects anything else, without echoing it', () {
+      for (final bad in [
+        '',
+        hex.substring(1),
+        '${hex}0',
+        '${hex.substring(1)}g',
+      ]) {
+        expect(
+          () => parseLinkKey(bad),
+          throwsA(
+            isA<FormatException>().having((e) => e.source, 'source', isNull),
+          ),
+        );
+      }
+    });
+
+    test('never prints the key', () {
+      expect('${parseLinkKey(hex)}', isNot(contains(hex)));
     });
   });
 }

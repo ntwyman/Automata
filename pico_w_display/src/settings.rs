@@ -1,5 +1,5 @@
-//! Flash-backed device settings — the TZ Rule and the Saved Network — and
-//! the TZ Rule in force.
+//! Flash-backed device settings — the TZ Rule, the Saved Network and the
+//! Link Key — and the TZ Rule in force.
 //!
 //! Backed by `sequential-storage`'s wear-levelled map over the
 //! `SETTINGS_STORAGE` region `memory.x` reserves (4 x 4 KiB sectors), one
@@ -7,17 +7,19 @@
 //! settings can share it. `main.rs` calls [`SettingsStore::load_tz`] once at
 //! boot and publishes the result to [`TZ_RULE`]; `TZ` (via [`TzSetting`])
 //! persists a new rule then publishes it. The Saved Network is loaded at
-//! boot too, but `wifi.rs` owns it from then on.
+//! boot too, but `wifi.rs` owns it from then on; so is the Link Key, which
+//! `link_key.rs` owns.
 //!
 //! The Saved Network's password is stored in plaintext; see
-//! `docs/adr/0004-plaintext-saved-network.md`.
+//! `docs/adr/0004-plaintext-saved-network.md`. So is the Link Key; see
+//! `docs/adr/0007-plaintext-link-key.md`.
 
 use defmt::{info, warn};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
 use heapless::String;
-use pico_w_display::protocol::{MAX_PASSWORD_LEN, MAX_SSID_LEN, TzStore};
+use pico_w_display::protocol::{LINK_KEY_LEN, MAX_PASSWORD_LEN, MAX_SSID_LEN, TzStore};
 use pico_w_display::tz::{MAX_TZ_LEN, TzRule};
 use sequential_storage::cache::{Cache, Uncached};
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
@@ -32,6 +34,9 @@ enum Key {
     Tz = 1,
     /// The Saved Network, as a [`StoredNetwork`].
     Network = 2,
+    /// The Link Key's raw bytes.
+    #[allow(clippy::enum_variant_names)] // The glossary's term.
+    LinkKey = 3,
 }
 
 /// The largest [`StoredNetwork`]: each `str` is a one-byte `postcard`
@@ -43,6 +48,7 @@ const MAX_NETWORK_LEN: usize = 1 + MAX_SSID_LEN + 1 + MAX_PASSWORD_LEN;
 const BUF_LEN: usize = 128;
 const _: () = assert!(MAX_TZ_LEN + 16 <= BUF_LEN);
 const _: () = assert!(MAX_NETWORK_LEN + 16 <= BUF_LEN);
+const _: () = assert!(LINK_KEY_LEN + 16 <= BUF_LEN);
 
 /// The network a successful `WIFI` joined, kept so the device can Rejoin it
 /// at boot or after a drop. Never log `password`.
@@ -193,6 +199,40 @@ impl SettingsStore {
         match self.map.store_item(&mut self.buf, &(Key::Network as u8), &stored).await {
             Ok(()) => {
                 info!("saved network persisted: {}", network.ssid.as_str());
+                Ok(())
+            }
+            Err(_) => {
+                warn!("settings flash write failed");
+                Err("flash write failed")
+            }
+        }
+    }
+
+    /// The persisted Link Key, or `None` if there isn't one — or if what's
+    /// stored can't be read or is the wrong length. Never log it.
+    pub async fn load_link_key(&mut self) -> Option<[u8; LINK_KEY_LEN]> {
+        let bytes = match self.map.fetch_item::<&[u8]>(&mut self.buf, &(Key::LinkKey as u8)).await {
+            Ok(bytes) => bytes?,
+            Err(_) => {
+                warn!("settings flash read failed");
+                return None;
+            }
+        };
+        let key = bytes.try_into().ok();
+        if key.is_none() {
+            warn!("stored link key is invalid; ignoring it");
+        }
+        key
+    }
+
+    /// Persists `key` as the Link Key, replacing any previous one. Briefly
+    /// glitches the LED output and cyw43 SPI traffic, like
+    /// [`SettingsStore::save_tz`].
+    pub async fn save_link_key(&mut self, key: &[u8; LINK_KEY_LEN]) -> Result<(), &'static str> {
+        let bytes: &[u8] = key;
+        match self.map.store_item(&mut self.buf, &(Key::LinkKey as u8), &bytes).await {
+            Ok(()) => {
+                info!("link key persisted");
                 Ok(())
             }
             Err(_) => {

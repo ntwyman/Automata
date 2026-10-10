@@ -151,6 +151,21 @@ class QueryTime extends Command {
   String toString() => 'QueryTime()';
 }
 
+/// Bare `KEY`: replies `OK <Link Key as 64 hex digits>` (see [parseLinkKey]),
+/// over BLE only; any other Transport gets `ERR not allowed`.
+class FetchLinkKey extends Command {
+  const FetchLinkKey();
+
+  @override
+  bool operator ==(Object other) => other is FetchLinkKey;
+
+  @override
+  int get hashCode => (FetchLinkKey).hashCode;
+
+  @override
+  String toString() => 'FetchLinkKey()';
+}
+
 /// The line the firmware parses back into [command]. Assumes [command]'s
 /// fields are already in range (see the `*Error` validators below).
 String encodeCommand(Command command) => switch (command) {
@@ -163,6 +178,7 @@ String encodeCommand(Command command) => switch (command) {
   FactoryReset() => 'RESET',
   SetTz(:final rule) => 'TZ $rule',
   QueryTime() => 'TIME',
+  FetchLinkKey() => 'KEY',
 };
 
 String _hex(int channel) =>
@@ -198,6 +214,8 @@ Command parseCommand(String line) {
       rest.trim().isEmpty ? const FactoryReset() : throw ProtocolError.badArgs,
     'TZ' => _parseTz(rest.trim()),
     'TIME' => const QueryTime(),
+    'KEY' =>
+      rest.trim().isEmpty ? const FetchLinkKey() : throw ProtocolError.badArgs,
     _ => throw ProtocolError.unknownCommand,
   };
 }
@@ -333,6 +351,33 @@ class ReplyErr extends Reply {
 /// The UTC in `TIME`'s `OK <UTC ISO-8601> <TZ Rule>` [detail]. Throws
 /// [FormatException] if it doesn't start with a timestamp.
 DateTime parseTimeUtc(String detail) => DateTime.parse(detail.split(' ').first);
+
+/// The device's 256-bit Link Key, as the 64 lowercase hex digits `KEY`
+/// replies with. Never logged: [toString] leaves it out.
+class LinkKey {
+  const LinkKey._(this.hex);
+
+  final String hex;
+
+  @override
+  bool operator ==(Object other) => other is LinkKey && other.hex == hex;
+
+  @override
+  int get hashCode => hex.hashCode;
+
+  @override
+  String toString() => 'LinkKey(<redacted>)';
+}
+
+/// The Link Key in `KEY`'s `OK <hex>` [detail], or in what a [LinkKey]'s
+/// [LinkKey.hex] was stored as. Throws [FormatException] — without the
+/// input, which may be a key — unless it's exactly 64 hex digits.
+LinkKey parseLinkKey(String detail) {
+  if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(detail)) {
+    throw const FormatException('Not a Link Key');
+  }
+  return LinkKey._(detail.toLowerCase());
+}
 
 /// Parses one reply line (terminator optional). Throws [FormatException]
 /// for anything that isn't `OK…` or `ERR …`.
