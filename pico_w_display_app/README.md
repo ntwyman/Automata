@@ -41,7 +41,7 @@ Never raise `flutter_blue_plus`'s log level to `LogLevel.verbose`: at that level
 1. Fresh install, freshly reset display (Unclaimed): tap Pair, no button press. Accept the OS pairing request. The app shows Connected, and the firmware logs `ble pairing complete` then `claimed`.
 2. Kill and relaunch the app: it reconnects with no scan, no button press and no dialog.
 3. Power-cycle the display, relaunch: same as 2.
-4. Pair a second phone with the now-Claimed display: Pairing may complete on that phone, but the display persists no Bond, so step 3 then fails for it. (Until the Link Key slice, that phone's transient link can still run Commands.)
+4. Pair a second phone with the now-Claimed display: the display persists no Bond and disconnects it (the firmware logs `ble link is not the claimed phone's`), so the app shows Pairing failed and no Command gets through.
 5. Repeat 1–3 on both a real iOS and a real Android device.
 
 If Pairing fails after the display was Factory Reset or paired with another phone, forget "Plasma 2350 W" in the phone's Bluetooth settings first — the phone otherwise keeps offering the stale keys.

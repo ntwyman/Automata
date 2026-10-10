@@ -11,7 +11,11 @@
 //! (ADR-0005) — so that phone reconnects with zero button presses,
 //! surviving a power cycle. A Claimed device makes no connection bondable,
 //! so no other phone can replace the Bond; only a Factory Reset does.
-//! Refusing those other phones' links outright comes with the Link Key.
+//!
+//! Only the Claimed phone may send Commands ([`LinkGuard`]): a link
+//! encrypted with the stored Bond, or the one whose Pairing just Claimed
+//! the device. Any other link is disconnected before a Command reaches its
+//! Session.
 use core::cell::Cell;
 
 use defmt::{info, warn};
@@ -24,6 +28,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use heapless::Vec;
+use pico_w_display::link_guard::{LinkEvent, LinkGuard, Verdict};
 use pico_w_display::protocol::{self, FactoryReset, TzStore, WallClock, WifiControl};
 use trouble_host::prelude::*;
 
@@ -250,8 +255,8 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
                     // Must happen before any pairing traffic arrives (see
                     // `set_bondable`'s own doc comment) — right after accept
                     // is the earliest point available. A Claimed device's
-                    // link still encrypts, just doesn't bond (a transient
-                    // Pairing, until the Link Key slice refuses it).
+                    // link can still pair, just not bond, and
+                    // `gatt_events_task` then disconnects it.
                     let _ = conn.raw().set_bondable(known_identity.get().is_none());
 
                     let rx: BleRxChannel = Channel::new();
@@ -343,10 +348,11 @@ async fn advertise<'values, 'server, C: Controller>(
     Ok(conn)
 }
 
-/// Streams GATT events for one connection: forwards `command` writes into
-/// `rx` (with a synthetic trailing `\n`, matching how `protocol::read_line`
-/// expects one command per terminated line) and answers every GATT request,
-/// until the connection drops.
+/// Streams GATT events for one connection: forwards the Claimed phone's
+/// `command` writes into `rx` (with a synthetic trailing `\n`, matching how
+/// `protocol::read_line` expects one command per terminated line) and
+/// answers every GATT request, until the connection drops. Any other link
+/// is disconnected, per [`LinkGuard`], and its writes refused.
 async fn gatt_events_task(
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     command: &Characteristic<Vec<u8, CMD_LEN>>,
@@ -355,6 +361,13 @@ async fn gatt_events_task(
     bond_store: &Mutex<CriticalSectionRawMutex, BondStore>,
     known_identity: &Cell<Option<Identity>>,
 ) {
+    let mut guard = LinkGuard::new();
+    let refuse = |verdict: Verdict| {
+        if verdict == Verdict::Disconnect {
+            warn!("ble link is not the claimed phone's: disconnecting");
+            conn.raw().disconnect();
+        }
+    };
     loop {
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
@@ -362,39 +375,64 @@ async fn gatt_events_task(
                 disconnected.signal(());
                 return;
             }
+            GattConnectionEvent::Encrypted { security_level, bond } => {
+                info!("ble encrypted: {:?}", security_level);
+                // `bond` is only `Some` when the link resumed a stored Bond,
+                // and the stack only ever holds the Claimed phone's. A fresh
+                // Pairing reports `None` here and is judged on its
+                // `PairingComplete` instead.
+                if let Some(bond) = bond
+                    && known_identity.get().is_some_and(|id| id.match_identity(&bond.identity))
+                {
+                    refuse(guard.on(LinkEvent::ResumedBond));
+                }
+            }
             GattConnectionEvent::PairingComplete { security_level, bond } => {
                 info!("ble pairing complete: {:?}", security_level);
                 // `bond` is only `Some` when both sides were bondable, which
                 // `run` allows only while Unclaimed: this Pairing Claims the
-                // device. A Claimed device's Pairing still completes, with
-                // `bond: None`, and nothing gets persisted.
-                if let Some(bond) = bond
-                    && known_identity.get().is_none()
-                {
-                    known_identity.set(Some(bond.identity));
-                    bond_store.lock().await.save(&bond).await;
-                    info!("claimed");
-                }
+                // device. Any other Pairing completes with `bond: None`,
+                // persists nothing, and is disconnected.
+                let claimed = match bond {
+                    Some(bond) if known_identity.get().is_none() => {
+                        known_identity.set(Some(bond.identity));
+                        bond_store.lock().await.save(&bond).await;
+                        info!("claimed");
+                        true
+                    }
+                    _ => false,
+                };
+                refuse(guard.on(LinkEvent::Paired { claimed }));
             }
             GattConnectionEvent::PairingFailed(err) => {
                 warn!("ble pairing failed: {:?}", err);
             }
             GattConnectionEvent::Gatt { event } => {
-                if let GattEvent::Write(write) = &event
-                    && write.handle() == command.handle
-                {
-                    let line = write.with_data(|_offset, data| {
-                        let mut buf: Vec<u8, RX_BUF_LEN> = Vec::new();
-                        let _ = buf.extend_from_slice(data);
-                        let _ = buf.push(b'\n');
-                        buf
-                    });
-                    rx.send(line).await;
-                }
-                match event.accept() {
+                let verdict = match &event {
+                    GattEvent::Write(write) if write.handle() == command.handle => {
+                        let verdict = guard.on(LinkEvent::Command);
+                        if verdict == Verdict::Forward {
+                            let line = write.with_data(|_offset, data| {
+                                let mut buf: Vec<u8, RX_BUF_LEN> = Vec::new();
+                                let _ = buf.extend_from_slice(data);
+                                let _ = buf.push(b'\n');
+                                buf
+                            });
+                            rx.send(line).await;
+                        }
+                        verdict
+                    }
+                    _ => Verdict::Continue,
+                };
+                let reply = match verdict {
+                    Verdict::Disconnect => event.reject(AttErrorCode::INSUFFICIENT_AUTHENTICATION),
+                    Verdict::Continue | Verdict::Forward => event.accept(),
+                };
+                match reply {
                     Ok(reply) => reply.send().await,
                     Err(_) => warn!("ble gatt reply error"),
                 }
+                refuse(verdict);
             }
             _ => {}
         }
