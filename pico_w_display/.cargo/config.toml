@@ -10,4 +10,7 @@ target = "thumbv8m.main-none-eabihf"
 # `WIFI` join's `SetWsecPmk`/`sae_password` payloads are the plaintext
 # password, defeating `protocol.rs`'s own `recv: WIFI <redacted>`. Lower it
 # locally (`DEFMT_LOG=debug cargo run ...`) only when debugging the chip.
-DEFMT_LOG = "debug,cyw43=info"
+# trouble-host's security manager stays at warn for the same reason: at info
+# it logs the bonded peer's `Identity`, IRK included, on every Pairing and
+# reconnect.
+DEFMT_LOG = "debug,cyw43=info,trouble_host::security_manager=warn"

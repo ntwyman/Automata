@@ -245,7 +245,9 @@ pub async fn run<J: WifiControl, C: WallClock, Z: TzStore, F: FactoryReset>(
     // reboots rather than clearing it.
     let known_identity: Cell<Option<Identity>> = Cell::new(initial_bond.as_ref().map(|b| b.identity));
     if let Some(bond) = initial_bond {
-        info!("restoring persisted bond: {}", bond);
+        // Only the address: `BondInformation`'s own `Format` includes the
+        // LTK and IRK, which must never reach RTT.
+        info!("restoring persisted bond: {}", bond.identity.addr);
         if stack.add_bond_information(bond).is_err() {
             warn!("failed to restore persisted bond");
         }
