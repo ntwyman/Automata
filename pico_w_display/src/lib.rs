@@ -12,6 +12,7 @@
 //! exercise them on the host.
 #![cfg_attr(not(test), no_std)]
 
+pub mod analog;
 pub mod factory_reset_hold;
 pub mod link_guard;
 pub mod protocol;

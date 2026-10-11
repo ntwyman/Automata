@@ -28,6 +28,8 @@ embassy-sync = "0.8.0"
 smart-leds = "0.4.0"
 embassy-futures = "0.1.2"
 heapless = "0.9.3"
+# `no_std` `sin`/`cos` for `analog.rs`'s hand angles.
+libm = "0.2"
 
 # Bare-metal only (`target_os = "none"`): chip/board bring-up, the RTT
 # logger, and the panic handler. None of this is reachable from `protocol`,
@@ -121,6 +123,8 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 # since the fakes in these tests never actually suspend on real I/O.
 critical-section = { version = "1.1", features = ["std"] }
 pollster = "0.4"
+# `examples/analog_png.rs` only: writes the Analog Face as PNGs on the host.
+png = "0.17"
 
 [profile.release]
 debug = 2
