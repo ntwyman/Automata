@@ -1,5 +1,5 @@
 //! Pure Wall Clock arithmetic on Unix time: what the grid shows for a given
-//! local instant ([`face`]), when that next changes ([`ms_until_change`]), the
+//! local instant ([`face`], [`hms`]), when that next changes ([`ms_until_change`]), the
 //! `TIME` reply's timestamp ([`iso8601`]), and the earliest time a Sync may
 //! report ([`year_start`]). Shifting UTC to local time is `tz`'s job.
 
@@ -37,6 +37,13 @@ pub fn face(local_ms: u64) -> Face {
         ],
         colon: local_ms % 1000 < BLINK_MS,
     }
+}
+
+/// The 24-hour local time of day at `local_ms` (see [`face`]) as hours,
+/// minutes and seconds, for the Analog Face.
+pub fn hms(local_ms: u64) -> (u8, u8, u8) {
+    let secs_of_day = (local_ms / 1000) % SECS_PER_DAY;
+    ((secs_of_day / 3600) as u8, (secs_of_day / 60 % 60) as u8, (secs_of_day % 60) as u8)
 }
 
 /// Milliseconds from `utc_ms` until [`face`] may next differ: the next
@@ -99,6 +106,14 @@ pub(crate) fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hms_is_the_24h_local_time_of_day() {
+        // NOW is 12:34:56; the milliseconds don't round up.
+        assert_eq!(hms(NOW * 1000 + 999), (12, 34, 56));
+        assert_eq!(hms(0), (0, 0, 0));
+        assert_eq!(hms(86_399_000), (23, 59, 59));
+    }
 
     /// 2026-10-03T12:34:56Z.
     const NOW: u64 = 1_791_030_896;

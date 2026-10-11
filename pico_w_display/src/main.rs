@@ -1,9 +1,10 @@
-//! Displays the NTP-synced Wall Clock (24-hour `HH:MM` local time, per the
-//! persisted TZ Rule) on a 17x17 WS2812 LED grid, in the colour and
-//! brightness a client connected over USB serial or BLE asks for. See
-//! `protocol.rs` for the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
+//! Displays the NTP-synced Wall Clock (local time, per the persisted TZ
+//! Rule) on a 17x17 WS2812 LED grid, in the Digital (`HH:MM`) or Analog Face
+//! and the colour and brightness a client connected over USB serial or BLE
+//! asks for. See `protocol.rs` for the command set, `ntp.rs` for Syncing,
+//! `analog.rs` for the Analog Face, `settings.rs` for the TZ Rule and
 //! `wifi.rs` for Rejoining the Saved Network, `link_key.rs` for the Link Key,
-//! and `factory_reset.rs` for the Factory Reset.
+//! and `factory_reset.rs` for the Factory Reset and Button A.
 
 #![no_std]
 #![no_main]
@@ -12,7 +13,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join5};
-use embassy_futures::select::{Either5, select5};
+use embassy_futures::select::{Either6, select6};
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Input, Pull};
@@ -25,7 +26,9 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::State as CdcAcmState;
+use pico_w_display::analog::{self, AnalogFrame};
 use pico_w_display::factory_reset_hold::Hold;
+use pico_w_display::protocol::Face;
 use pico_w_display::tz::TzRule;
 use pico_w_display::{protocol, wall_clock};
 use smart_leds::colors;
@@ -96,9 +99,20 @@ impl Frame {
     }
 }
 
-/// Draws `frame`, unless Button A is being held for a Factory Reset, in
+/// What the grid shows of the Wall Clock: a [`Frame`] for the Digital Face,
+/// or every LED's colour for the Analog one.
+// No heap to box the Analog frame into, and only the shown and the next
+// `View` ever exist at once.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Digital(Frame),
+    Analog(AnalogFrame),
+}
+
+/// Draws `view`, unless Button A is being held for a Factory Reset, in
 /// which case the hold's progress bar replaces it.
-fn render(grid: &mut DisplayGrid, frame: Frame, hold: Hold) {
+fn render(grid: &mut DisplayGrid, view: View, hold: Hold) {
     grid.clear();
     let filled = match hold {
         Hold::Idle => None,
@@ -113,6 +127,17 @@ fn render(grid: &mut DisplayGrid, frame: Frame, hold: Hold) {
         }
         return;
     }
+    let frame = match view {
+        View::Digital(frame) => frame,
+        View::Analog(leds) => {
+            // The grid's y grows upward (the glyphs in `fonts.rs` store row
+            // 0 at the bottom); an Analog frame's row 0 is the top.
+            for (i, led) in leds.iter().enumerate() {
+                grid.set(i % analog::SIZE, analog::SIZE - 1 - i / analog::SIZE, *led);
+            }
+            return;
+        }
+    };
     for (i, cell) in frame.cells.iter().enumerate() {
         match cell {
             Some(d) => {
@@ -128,20 +153,36 @@ fn render(grid: &mut DisplayGrid, frame: Frame, hold: Hold) {
     }
 }
 
-/// The Wall Clock at `now` given the last Sync (`boot_utc_ms`, see
-/// `ntp::WALL_CLOCK`) and the TZ Rule, and when that next changes on its own
-/// — `None` while Unsynced, when only a Sync can change it.
-fn frame_at(boot_utc_ms: Option<u64>, tz: &TzRule, now: Instant) -> (Frame, Option<Instant>) {
-    match boot_utc_ms {
-        None => (UNSYNCED, None),
-        Some(boot_utc_ms) => {
-            let utc_ms = ntp::utc_ms(boot_utc_ms, now);
-            let face = wall_clock::face(tz.local_ms(utc_ms));
-            // DST transitions land on whole seconds, so on a colon toggle too.
-            let next = now + Duration::from_millis(wall_clock::ms_until_change(utc_ms));
-            (Frame::digits(face.digits, face.colon), Some(next))
+/// The Wall Clock in `face` at `now` given the last Sync (`boot_utc_ms`,
+/// see `ntp::WALL_CLOCK`), the TZ Rule and the grid's colours, and when that
+/// next changes on its own — `None` while Unsynced, when only a Sync can
+/// change it.
+fn view_at(face: Face, boot_utc_ms: Option<u64>, tz: &TzRule, now: Instant, grid: &DisplayGrid) -> (View, Option<Instant>) {
+    let (fg, bg) = (grid.foreground(), grid.background());
+    let Some(boot_utc_ms) = boot_utc_ms else {
+        let view = match face {
+            Face::Digital => View::Digital(UNSYNCED),
+            Face::Analog => View::Analog(analog::render_analog_unsynced(fg, bg)),
+        };
+        return (view, None);
+    };
+    let utc_ms = ntp::utc_ms(boot_utc_ms, now);
+    let local_ms = tz.local_ms(utc_ms);
+    let view = match face {
+        Face::Digital => {
+            let digits = wall_clock::face(local_ms);
+            View::Digital(Frame::digits(digits.digits, digits.colon))
         }
-    }
+        Face::Analog => {
+            let (h, m, s) = wall_clock::hms(local_ms);
+            View::Analog(analog::render_analog(h, m, s, fg, bg))
+        }
+    };
+    // DST transitions land on whole seconds, so on a colon toggle too. The
+    // Analog Face only changes on whole seconds; checking on each half is
+    // harmless, since an unchanged view isn't redrawn.
+    let next = now + Duration::from_millis(wall_clock::ms_until_change(utc_ms));
+    (view, Some(next))
 }
 
 #[embassy_executor::main]
@@ -197,6 +238,8 @@ async fn main(spawner: Spawner) {
         info!("restoring color: {:02x}{:02x}{:02x}", color.r, color.g, color.b);
         grd.set_foreground(color);
     }
+    let initial_face = settings_store.load_face().await.unwrap_or_default();
+    info!("face: {}", initial_face);
     let initial_link_key = settings_store.load_link_key().await;
     if let Some(key) = initial_link_key {
         info!("restoring link key");
@@ -247,8 +290,9 @@ async fn main(spawner: Spawner) {
     // whose progress the display loop draws.
     let factory_reset_signal = factory_reset::FactoryResetSignal::new();
     let hold_signal = factory_reset::HoldSignal::new();
+    let short_press_signal = factory_reset::ShortPressSignal::new();
     let button_a = Input::new(p.PIN_12, Pull::Up);
-    let button_fut = factory_reset::watch_button(button_a, &hold_signal, &factory_reset_signal);
+    let button_fut = factory_reset::watch_button(button_a, &hold_signal, &factory_reset_signal, &short_press_signal);
     let factory_reset_fut = factory_reset::run(&factory_reset_signal, &bond_store_mutex, &settings_mutex);
 
     // USB CDC-ACM serial port. All these buffers are plain locals, borrowed
@@ -310,14 +354,15 @@ async fn main(spawner: Spawner) {
         let mut boot_utc_ms: Option<u64> = None;
         let mut tz = settings::current_tz();
         let mut hold = Hold::Idle;
-        let mut shown: Option<(Frame, Hold)> = None;
+        let mut face = initial_face;
+        let mut shown: Option<(View, Hold)> = None;
 
         loop {
-            let (frame, next_change) = frame_at(boot_utc_ms, &tz, Instant::now());
-            if shown != Some((frame, hold)) {
-                render(&mut grd, frame, hold);
+            let (view, next_change) = view_at(face, boot_utc_ms, &tz, Instant::now(), &grd);
+            if shown != Some((view, hold)) {
+                render(&mut grd, view, hold);
                 grd.update().await;
-                shown = Some((frame, hold));
+                shown = Some((view, hold));
             }
 
             let tick = async {
@@ -326,27 +371,29 @@ async fn main(spawner: Spawner) {
                     None => core::future::pending().await,
                 }
             };
-            match select5(
+            match select6(
                 tick,
                 display.receive(),
                 syncs.changed(),
                 tz_changes.changed(),
                 hold_signal.wait(),
+                short_press_signal.wait(),
             )
             .await
             {
-                Either5::First(()) => {}
-                Either5::Second(command) => {
+                Either6::First(()) => {}
+                Either6::Second(command) => {
                     match command {
                         protocol::Command::Color(c) => grd.set_foreground(c),
                         protocol::Command::Brightness(b) => grd.set_brightness(b),
+                        protocol::Command::Face(f) => face = f,
                     }
-                    // Always redrawn, even though the frame is unchanged,
-                    // and before the ack so `OK` means it's shown.
-                    let (frame, _) = frame_at(boot_utc_ms, &tz, Instant::now());
-                    render(&mut grd, frame, hold);
+                    // Always redrawn, even if the view is unchanged, and
+                    // before the ack so `OK` means it's shown.
+                    let (view, _) = view_at(face, boot_utc_ms, &tz, Instant::now(), &grd);
+                    render(&mut grd, view, hold);
                     grd.update().await;
-                    shown = Some((frame, hold));
+                    shown = Some((view, hold));
 
                     // Persisted after the redraw, so the flash write can't
                     // glitch the frame, and before the ack, like `TZ`. A
@@ -356,14 +403,25 @@ async fn main(spawner: Spawner) {
                     let _ = match command {
                         protocol::Command::Color(c) => settings.save_color(c).await,
                         protocol::Command::Brightness(b) => settings.save_brightness(b).await,
+                        protocol::Command::Face(f) => settings.save_face(f).await,
                     };
                     drop(settings);
 
                     display.ack().await;
                 }
-                Either5::Third(synced) => boot_utc_ms = Some(synced),
-                Either5::Fourth(rule) => tz = rule,
-                Either5::Fifth(state) => hold = state,
+                Either6::Third(synced) => boot_utc_ms = Some(synced),
+                Either6::Fourth(rule) => tz = rule,
+                Either6::Fifth(state) => hold = state,
+                Either6::Sixth(()) => {
+                    face = face.next();
+                    info!("button A short press: face {}", face);
+                    // Redrawn before the flash write, as for a Command.
+                    let (view, _) = view_at(face, boot_utc_ms, &tz, Instant::now(), &grd);
+                    render(&mut grd, view, hold);
+                    grd.update().await;
+                    shown = Some((view, hold));
+                    let _ = settings_mutex.lock().await.save_face(face).await;
+                }
             }
         }
     };

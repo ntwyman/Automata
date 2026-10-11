@@ -1,7 +1,7 @@
-//! Button A's Factory Reset hold: what a press shows, and whether it's
-//! triggered, given when it went down and (if it has) came back up. The
-//! on-device task that watches the button and acts on it lives in
-//! `factory_reset.rs`.
+//! Button A: what a press shows, whether it's triggered a Factory Reset,
+//! and whether it was a short press (which cycles the Face), given when it
+//! went down and (if it has) came back up. The on-device task that watches
+//! the button and acts on it lives in `factory_reset.rs`.
 
 /// How long Button A must be held to trigger a Factory Reset.
 pub const HOLD_MS: u64 = 5_000;
@@ -39,11 +39,56 @@ pub fn hold_at(pressed_ms: u64, released_ms: Option<u64>, now_ms: u64, width: us
     }
 }
 
+/// Presses shorter than this are contact bounce, not a press.
+pub const DEBOUNCE_MS: u64 = 30;
+
+/// Whether a press that went down at `pressed_ms` and came up at
+/// `released_ms` was a short press: long enough not to be a bounce, and
+/// released before the progress bar (`width` columns) lit its first
+/// column. Anything longer was the start of a Factory Reset hold, even one
+/// let go of early, so aborting a reset never also switches the Face.
+pub fn is_short_press(pressed_ms: u64, released_ms: u64, width: usize) -> bool {
+    let held = released_ms.saturating_sub(pressed_ms);
+    held >= DEBOUNCE_MS && hold_at(pressed_ms, None, released_ms, width) == Hold::Idle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const W: usize = 17;
+
+    #[test]
+    fn a_tap_is_a_short_press() {
+        assert!(is_short_press(1_000, 1_100, W));
+        assert!(is_short_press(1_000, 1_000 + DEBOUNCE_MS, W));
+    }
+
+    #[test]
+    fn a_bounce_is_not_a_short_press() {
+        assert!(!is_short_press(1_000, 1_000, W));
+        assert!(!is_short_press(1_000, 1_000 + DEBOUNCE_MS - 1, W));
+    }
+
+    #[test]
+    fn a_press_ends_being_short_as_the_bar_lights() {
+        let column_ms = HOLD_MS / W as u64;
+        assert!(is_short_press(0, column_ms - 1, W));
+        assert!(!is_short_press(0, column_ms + 1, W));
+    }
+
+    #[test]
+    fn an_aborted_or_completed_hold_is_not_a_short_press() {
+        assert!(!is_short_press(0, HOLD_MS / 2, W));
+        assert!(!is_short_press(0, HOLD_MS, W));
+        assert!(!is_short_press(0, HOLD_MS + 500, W));
+    }
+
+    #[test]
+    fn release_before_press_is_not_a_short_press() {
+        // Can't really happen, but mustn't underflow into a long hold.
+        assert!(!is_short_press(1_000, 0, W));
+    }
 
     #[test]
     fn full_hold_triggers() {

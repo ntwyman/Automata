@@ -204,6 +204,27 @@ pub enum Command {
     Color(RGB8),
     /// Set overall LED brightness (0-255).
     Brightness(u8),
+    /// Draw the Wall Clock in this Face from now on.
+    Face(Face),
+}
+
+/// How the Wall Clock is drawn (`CONTEXT.md`'s Face entry). Digital until
+/// `FACE` or Button A says otherwise.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum Face {
+    #[default]
+    Digital,
+    Analog,
+}
+
+impl Face {
+    /// The Face a short press of Button A switches to.
+    pub fn next(self) -> Face {
+        match self {
+            Face::Digital => Face::Analog,
+            Face::Analog => Face::Digital,
+        }
+    }
 }
 
 /// A parsed line: either a [`Command`] destined for the display loop, or a
@@ -262,6 +283,8 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
         parse_color(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("BRIGHTNESS") {
         parse_brightness(rest).map(ParsedLine::Display)
+    } else if cmd.eq_ignore_ascii_case("FACE") {
+        parse_face(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("WIFI") {
         parse_wifi(rest)
     } else if cmd.eq_ignore_ascii_case("FORGET") {
@@ -305,6 +328,17 @@ fn parse_brightness(s: &str) -> Result<Command, ProtocolError> {
     let n: u16 = s.parse().map_err(|_| ProtocolError::BadArgs)?;
     let n = u8::try_from(n).map_err(|_| ProtocolError::BadArgs)?;
     Ok(Command::Brightness(n))
+}
+
+/// `DIGITAL` or `ANALOG`, in any case.
+fn parse_face(s: &str) -> Result<Command, ProtocolError> {
+    if s.eq_ignore_ascii_case("DIGITAL") {
+        Ok(Command::Face(Face::Digital))
+    } else if s.eq_ignore_ascii_case("ANALOG") {
+        Ok(Command::Face(Face::Analog))
+    } else {
+        Err(ProtocolError::BadArgs)
+    }
 }
 
 /// `<ssid> <password>`. The SSID can't contain spaces, but the password is
@@ -811,6 +845,32 @@ mod tests {
     #[test]
     fn clock_is_unknown() {
         assert_eq!(run("CLOCK\n", ok_wifi()), "ERR unknown command\n");
+    }
+
+    #[test]
+    fn face_valid() {
+        assert_eq!(run("FACE DIGITAL\nFACE ANALOG\nface analog\n", ok_wifi()), "OK\nOK\nOK\n");
+    }
+
+    #[test]
+    fn face_bare_or_unknown_is_bad_args() {
+        assert_eq!(
+            run("FACE\nFACE SUNDIAL\nFACE ANALOG X\n", ok_wifi()),
+            "ERR bad args\nERR bad args\nERR bad args\n"
+        );
+    }
+
+    #[test]
+    fn face_reaches_the_display() {
+        assert!(matches!(parse_line("FACE ANALOG"), Ok(ParsedLine::Display(Command::Face(Face::Analog)))));
+        assert!(matches!(parse_line("face digital"), Ok(ParsedLine::Display(Command::Face(Face::Digital)))));
+    }
+
+    #[test]
+    fn faces_cycle() {
+        assert_eq!(Face::default(), Face::Digital);
+        assert_eq!(Face::Digital.next(), Face::Analog);
+        assert_eq!(Face::Analog.next(), Face::Digital);
     }
 
     #[test]

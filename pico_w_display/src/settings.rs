@@ -9,8 +9,9 @@
 //! boot and publishes the result to [`TZ_RULE`]; `TZ` (via [`TzSetting`])
 //! persists a new rule then publishes it. The Saved Network is loaded at
 //! boot too, but `wifi.rs` owns it from then on; so is the Link Key, which
-//! `link_key.rs` owns. Brightness and colour are loaded at boot before the
-//! first frame, and the display loop persists each `BRIGHTNESS` and `COLOR`.
+//! `link_key.rs` owns. Brightness, colour and the Face are loaded at boot
+//! before the first frame, and the display loop persists each `BRIGHTNESS`,
+//! `COLOR` and `FACE`, and each Face change from Button A.
 //!
 //! The Saved Network's password is stored in plaintext; see
 //! `docs/adr/0004-plaintext-saved-network.md`. So is the Link Key; see
@@ -21,7 +22,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
 use heapless::String;
-use pico_w_display::protocol::{LINK_KEY_LEN, MAX_PASSWORD_LEN, MAX_SSID_LEN, TzStore};
+use pico_w_display::protocol::{Face, LINK_KEY_LEN, MAX_PASSWORD_LEN, MAX_SSID_LEN, TzStore};
 use pico_w_display::tz::{MAX_TZ_LEN, TzRule};
 use sequential_storage::cache::{Cache, Uncached};
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
@@ -45,6 +46,8 @@ enum Key {
     Brightness = 4,
     /// The foreground colour as three bytes: red, green, blue.
     Color = 5,
+    /// The Face as one byte: 0 Digital, 1 Analog.
+    Face = 6,
 }
 
 /// The largest [`StoredNetwork`]: each `str` is a one-byte `postcard`
@@ -283,6 +286,31 @@ impl SettingsStore {
     pub async fn save_color(&mut self, color: RGB8) -> Result<(), &'static str> {
         if self.save_if_changed(Key::Color, &[color.r, color.g, color.b]).await? {
             info!("color persisted: {:02x}{:02x}{:02x}", color.r, color.g, color.b);
+        }
+        Ok(())
+    }
+
+    /// The persisted Face, or `None` if none was ever set — or if what's
+    /// stored can't be read or isn't a Face, which leaves Digital.
+    pub async fn load_face(&mut self) -> Option<Face> {
+        match self.load_bytes::<1>(Key::Face, "face").await? {
+            [0] => Some(Face::Digital),
+            [1] => Some(Face::Analog),
+            _ => {
+                warn!("stored face is invalid; ignoring it");
+                None
+            }
+        }
+    }
+
+    /// Persists `face`, skipping the flash write when it's unchanged.
+    pub async fn save_face(&mut self, face: Face) -> Result<(), &'static str> {
+        let byte = match face {
+            Face::Digital => 0,
+            Face::Analog => 1,
+        };
+        if self.save_if_changed(Key::Face, &[byte]).await? {
+            info!("face persisted: {}", face);
         }
         Ok(())
     }

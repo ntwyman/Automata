@@ -124,6 +124,10 @@ impl<'d, const WIDTH: usize, const SIZE: usize> Grid<'d, WIDTH, SIZE> {
     pub fn set_foreground(&mut self, color: RGB8) {
         self.foreground = color;
     }
+    pub fn background(&self) -> RGB8 {
+        self.background
+    }
+
     pub fn set_background(&mut self, color: RGB8) {
         self.background = color;
     }

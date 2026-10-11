@@ -1,12 +1,15 @@
 //! Factory Reset (`CONTEXT.md`): erase every persisted item and reboot
-//! Unclaimed. Two ways in — holding Button A for
+//! Unclaimed. Also Button A's short press, which cycles the Face. Two ways
+//! into a Factory Reset — holding Button A for
 //! [`factory_reset_hold::HOLD_MS`](pico_w_display::factory_reset_hold::HOLD_MS), watched by
 //! [`watch_button`], or `RESET` from any Session, via [`FactoryResetRequest`] —
 //! and both end in [`run`].
 //!
 //! Button A (GP12) is active low, like GP22 was. It needs no separate
 //! debounce: a bounce at either edge reads as a press too short to light a
-//! column, which [`factory_reset_hold::hold_at`] already treats as a no-op.
+//! column, which [`factory_reset_hold::hold_at`] already treats as a no-op,
+//! and too short to pass [`factory_reset_hold::is_short_press`]'s
+//! [`DEBOUNCE_MS`](factory_reset_hold::DEBOUNCE_MS).
 
 use defmt::{info, warn};
 use embassy_futures::select::{Either, select};
@@ -36,6 +39,9 @@ pub type FactoryResetSignal = Signal<CriticalSectionRawMutex, ()>;
 /// go back to the Wall Clock.
 pub type HoldSignal = Signal<CriticalSectionRawMutex, Hold>;
 
+/// Button A was short-pressed: the display loop cycles the Face.
+pub type ShortPressSignal = Signal<CriticalSectionRawMutex, ()>;
+
 /// Implements [`FactoryReset`] for `RESET`, one per Session.
 #[derive(Clone, Copy)]
 pub struct FactoryResetRequest<'a>(pub &'a FactoryResetSignal);
@@ -47,9 +53,14 @@ impl FactoryReset for FactoryResetRequest<'_> {
 }
 
 /// Watches Button A forever, publishing each change in its [`Hold`] to
-/// `hold` and asking `reset` for a Factory Reset once a hold completes. A
-/// short press does nothing (reserved for cycling Faces).
-pub async fn watch_button(mut button: Input<'_>, hold: &HoldSignal, reset: &FactoryResetSignal) -> ! {
+/// `hold`, asking `reset` for a Factory Reset once a hold completes, and
+/// signalling `short_press` on the release of a short press.
+pub async fn watch_button(
+    mut button: Input<'_>,
+    hold: &HoldSignal,
+    reset: &FactoryResetSignal,
+    short_press: &ShortPressSignal,
+) -> ! {
     loop {
         button.wait_for_low().await;
         let pressed = Instant::now().as_millis();
@@ -68,7 +79,10 @@ pub async fn watch_button(mut button: Input<'_>, hold: &HoldSignal, reset: &Fact
                 // `run` reboots the device; there's nothing left to watch.
                 core::future::pending::<()>().await;
             }
-            if released.is_some() {
+            if let Some(released) = released {
+                if factory_reset_hold::is_short_press(pressed, released, crate::GRID_WIDTH) {
+                    short_press.signal(());
+                }
                 break;
             }
             if let Either::First(()) = select(button.wait_for_high(), Timer::after(TICK)).await {
