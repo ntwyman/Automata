@@ -1,5 +1,6 @@
-//! Flash-backed device settings — the TZ Rule, the Saved Network and the
-//! Link Key — and the TZ Rule in force.
+//! Flash-backed device settings — the TZ Rule, the Saved Network, the
+//! Link Key, and the display's brightness and colour — and the TZ Rule in
+//! force.
 //!
 //! Backed by `sequential-storage`'s wear-levelled map over the
 //! `SETTINGS_STORAGE` region `memory.x` reserves (4 x 4 KiB sectors), one
@@ -8,7 +9,8 @@
 //! boot and publishes the result to [`TZ_RULE`]; `TZ` (via [`TzSetting`])
 //! persists a new rule then publishes it. The Saved Network is loaded at
 //! boot too, but `wifi.rs` owns it from then on; so is the Link Key, which
-//! `link_key.rs` owns.
+//! `link_key.rs` owns. Brightness and colour are loaded at boot before the
+//! first frame, and the display loop persists each `BRIGHTNESS` and `COLOR`.
 //!
 //! The Saved Network's password is stored in plaintext; see
 //! `docs/adr/0004-plaintext-saved-network.md`. So is the Link Key; see
@@ -24,10 +26,12 @@ use pico_w_display::tz::{MAX_TZ_LEN, TzRule};
 use sequential_storage::cache::{Cache, Uncached};
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use serde::{Deserialize, Serialize};
+use smart_leds::RGB8;
 
 use crate::flash::{self, FlashHandle, SharedFlash};
 
 /// Each setting's key in the map. Never renumber one: it's what's in flash.
+#[derive(Clone, Copy)]
 #[repr(u8)]
 enum Key {
     /// The TZ Rule's text, as sent.
@@ -37,6 +41,10 @@ enum Key {
     /// The Link Key's raw bytes.
     #[allow(clippy::enum_variant_names)] // The glossary's term.
     LinkKey = 3,
+    /// The brightness as one byte.
+    Brightness = 4,
+    /// The foreground colour as three bytes: red, green, blue.
+    Color = 5,
 }
 
 /// The largest [`StoredNetwork`]: each `str` is a one-byte `postcard`
@@ -142,9 +150,15 @@ impl SettingsStore {
     /// Whether flash holds exactly `rule`'s text. Unlike [`Self::load_tz`],
     /// quiet: an unreadable or invalid record just doesn't match.
     pub async fn holds_tz(&mut self, rule: &TzRule) -> bool {
+        self.holds(Key::Tz, rule.as_str().as_bytes()).await
+    }
+
+    /// Whether flash holds exactly `bytes` under `key`. Quiet: an unreadable
+    /// record just doesn't match.
+    async fn holds(&mut self, key: Key, bytes: &[u8]) -> bool {
         matches!(
-            self.map.fetch_item::<&[u8]>(&mut self.buf, &(Key::Tz as u8)).await,
-            Ok(Some(text)) if text == rule.as_str().as_bytes()
+            self.map.fetch_item::<&[u8]>(&mut self.buf, &(key as u8)).await,
+            Ok(Some(stored)) if stored == bytes
         )
     }
 
@@ -235,6 +249,70 @@ impl SettingsStore {
                 info!("link key persisted");
                 Ok(())
             }
+            Err(_) => {
+                warn!("settings flash write failed");
+                Err("flash write failed")
+            }
+        }
+    }
+
+    /// The persisted brightness, or `None` if none was ever set — or if
+    /// what's stored can't be read, which leaves the boot default.
+    pub async fn load_brightness(&mut self) -> Option<u8> {
+        self.load_bytes::<1>(Key::Brightness, "brightness").await.map(|[b]| b)
+    }
+
+    /// Persists `brightness`, skipping the flash write when it's unchanged:
+    /// the app sends `BRIGHTNESS` every time its slider is released.
+    pub async fn save_brightness(&mut self, brightness: u8) -> Result<(), &'static str> {
+        if self.save_if_changed(Key::Brightness, &[brightness]).await? {
+            info!("brightness persisted: {}", brightness);
+        }
+        Ok(())
+    }
+
+    /// The persisted foreground colour, or `None` if none was ever set — or
+    /// if what's stored can't be read, which leaves the boot default.
+    pub async fn load_color(&mut self) -> Option<RGB8> {
+        self.load_bytes::<3>(Key::Color, "color")
+            .await
+            .map(|[r, g, b]| RGB8::new(r, g, b))
+    }
+
+    /// Persists `color`, skipping the flash write when it's unchanged.
+    pub async fn save_color(&mut self, color: RGB8) -> Result<(), &'static str> {
+        if self.save_if_changed(Key::Color, &[color.r, color.g, color.b]).await? {
+            info!("color persisted: {:02x}{:02x}{:02x}", color.r, color.g, color.b);
+        }
+        Ok(())
+    }
+
+    /// The `N` bytes stored under `key`, or `None` if there are none, they
+    /// can't be read, or they're the wrong length (logged as `what`).
+    async fn load_bytes<const N: usize>(&mut self, key: Key, what: &str) -> Option<[u8; N]> {
+        let bytes = match self.map.fetch_item::<&[u8]>(&mut self.buf, &(key as u8)).await {
+            Ok(bytes) => bytes?,
+            Err(_) => {
+                warn!("settings flash read failed");
+                return None;
+            }
+        };
+        let value = bytes.try_into().ok();
+        if value.is_none() {
+            warn!("stored {=str} is invalid; ignoring it", what);
+        }
+        value
+    }
+
+    /// Stores `bytes` under `key` unless flash already holds them (reads
+    /// don't wear it). `Ok(true)` if it wrote. A write briefly glitches the
+    /// LED output and cyw43 SPI traffic, like [`SettingsStore::save_tz`].
+    async fn save_if_changed(&mut self, key: Key, bytes: &[u8]) -> Result<bool, &'static str> {
+        if self.holds(key, bytes).await {
+            return Ok(false);
+        }
+        match self.map.store_item(&mut self.buf, &(key as u8), &bytes).await {
+            Ok(()) => Ok(true),
             Err(_) => {
                 warn!("settings flash write failed");
                 Err("flash write failed")

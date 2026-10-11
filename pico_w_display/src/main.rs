@@ -189,6 +189,14 @@ async fn main(spawner: Spawner) {
         info!("restoring saved network: {}", network.ssid.as_str());
         wifi_dev.restore(network);
     }
+    if let Some(brightness) = settings_store.load_brightness().await {
+        info!("restoring brightness: {}", brightness);
+        grd.set_brightness(brightness);
+    }
+    if let Some(color) = settings_store.load_color().await {
+        info!("restoring color: {:02x}{:02x}{:02x}", color.r, color.g, color.b);
+        grd.set_foreground(color);
+    }
     let initial_link_key = settings_store.load_link_key().await;
     if let Some(key) = initial_link_key {
         info!("restoring link key");
@@ -339,6 +347,17 @@ async fn main(spawner: Spawner) {
                     render(&mut grd, frame, hold);
                     grd.update().await;
                     shown = Some((frame, hold));
+
+                    // Persisted after the redraw, so the flash write can't
+                    // glitch the frame, and before the ack, like `TZ`. A
+                    // failed write is logged; the setting still applies
+                    // until the next boot.
+                    let mut settings = settings_mutex.lock().await;
+                    let _ = match command {
+                        protocol::Command::Color(c) => settings.save_color(c).await,
+                        protocol::Command::Brightness(b) => settings.save_brightness(b).await,
+                    };
+                    drop(settings);
 
                     display.ack().await;
                 }
