@@ -21,12 +21,20 @@ const HOUR_LEN: f32 = 5.0;
 const MINUTE_LEN: f32 = 7.0;
 
 /// Shares of `fg` each element is drawn at: the minute hand is `fg` itself.
+/// The other hours' markers are dimmer than 12/3/6/9's, so the quarters
+/// still stand out.
 const HOUR_SHADE: f32 = 0.5;
-const MARKER_SHADE: f32 = 0.3;
+const QUARTER_MARKER_SHADE: f32 = 0.3;
+const HOUR_MARKER_SHADE: f32 = 0.15;
 const SECONDS_SHADE: f32 = 0.6;
 
+/// The rim pixels nearest 12, 3, 6 and 9 o'clock.
+const QUARTER_MARKERS: [(usize, usize); 4] = [(8, 0), (16, 8), (8, 16), (0, 8)];
+/// The rim pixels nearest the other eight hours, clockwise from 1.
+const HOUR_MARKERS: [(usize, usize); 8] = [(12, 1), (15, 4), (15, 12), (12, 15), (4, 15), (1, 12), (1, 4), (4, 1)];
+
 /// The Analog Face at `h:m:s` (24-hour `h`): hour and minute hands in
-/// shades of `fg`, rim markers at 12/3/6/9, and a seconds pixel orbiting
+/// shades of `fg`, a rim marker at every hour, and a seconds pixel orbiting
 /// the rim, over `bg`. The hands sweep: the hour hand moves with the
 /// minutes and the minute hand with the seconds.
 pub fn render_analog(h: u8, m: u8, s: u8, fg: RGB8, bg: RGB8) -> AnalogFrame {
@@ -48,9 +56,10 @@ pub fn render_analog(h: u8, m: u8, s: u8, fg: RGB8, bg: RGB8) -> AnalogFrame {
 /// the analog `--:--`.
 pub fn render_analog_unsynced(fg: RGB8, bg: RGB8) -> AnalogFrame {
     let mut frame = [bg; SIZE * SIZE];
-    let marker = shade(fg, MARKER_SHADE);
-    for (x, y) in [(8, 0), (16, 8), (8, 16), (0, 8)] {
-        frame[y * SIZE + x] = marker;
+    for (markers, share) in [(&QUARTER_MARKERS[..], QUARTER_MARKER_SHADE), (&HOUR_MARKERS[..], HOUR_MARKER_SHADE)] {
+        for &(x, y) in markers {
+            frame[y * SIZE + x] = shade(fg, share);
+        }
     }
     frame
 }
@@ -99,7 +108,13 @@ mod tests {
 
     const FG: RGB8 = RGB8 { r: 255, g: 255, b: 255 };
     const BG: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
-    const MARKERS: [(usize, usize); 4] = [(8, 0), (16, 8), (8, 16), (0, 8)];
+    const QUARTERS: [(usize, usize); 4] = [(8, 0), (16, 8), (8, 16), (0, 8)];
+    const OTHER_HOURS: [(usize, usize); 8] =
+        [(12, 1), (15, 4), (15, 12), (12, 15), (4, 15), (1, 12), (1, 4), (4, 1)];
+
+    fn is_marker(p: &(usize, usize)) -> bool {
+        QUARTERS.contains(p) || OTHER_HOURS.contains(p)
+    }
 
     fn at(frame: &AnalogFrame, x: usize, y: usize) -> RGB8 {
         frame[y * SIZE + x]
@@ -115,7 +130,7 @@ mod tests {
 
     /// [`lit`], less the rim markers.
     fn lit_off_markers(frame: &AnalogFrame) -> std::vec::Vec<(usize, usize)> {
-        lit(frame).into_iter().filter(|p| !MARKERS.contains(p)).collect()
+        lit(frame).into_iter().filter(|p| !is_marker(p)).collect()
     }
 
     fn brightness(c: RGB8) -> u16 {
@@ -168,8 +183,9 @@ mod tests {
     #[test]
     fn the_seconds_pixel_is_on_the_rim() {
         // Near 12:00 the 7 px minute hand lights nothing more than 7.5 px
-        // out, so whatever is, off the markers, is the seconds pixel.
-        for s in [5, 10, 20, 25, 35, 40, 50, 55] {
+        // out, so whatever is, off the markers, is the seconds pixel. Every
+        // fifth second it sits on an hour marker, so these fall between.
+        for s in [3, 8, 13, 22, 27, 38, 47, 52] {
             let frame = render_analog(0, 0, s, FG, BG);
             let outer: std::vec::Vec<_> =
                 lit_off_markers(&frame).into_iter().filter(|&(x, y)| radius(x, y) > 7.5).collect();
@@ -182,10 +198,21 @@ mod tests {
 
     #[test]
     fn the_unsynced_frame_has_markers_only() {
-        let mut lit = lit(&render_analog_unsynced(FG, BG));
+        let frame = render_analog_unsynced(FG, BG);
+        let mut lit = lit(&frame);
         lit.sort();
-        let mut markers = MARKERS.to_vec();
+        let mut markers = [QUARTERS.as_slice(), OTHER_HOURS.as_slice()].concat();
         markers.sort();
         assert_eq!(lit, markers);
+    }
+
+    #[test]
+    fn quarter_markers_are_brighter_than_the_other_hours() {
+        let frame = render_analog_unsynced(FG, BG);
+        for &(qx, qy) in &QUARTERS {
+            for &(x, y) in &OTHER_HOURS {
+                assert!(brightness(at(&frame, qx, qy)) > brightness(at(&frame, x, y)));
+            }
+        }
     }
 }
