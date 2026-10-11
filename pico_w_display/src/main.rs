@@ -1,7 +1,7 @@
 //! Displays the NTP-synced Wall Clock (24-hour `HH:MM` local time, per the
-//! persisted TZ Rule) on a 17x17 WS2812 LED grid, or whatever a client
-//! connected over USB serial or BLE asks for instead. See `protocol.rs` for
-//! the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
+//! persisted TZ Rule) on a 17x17 WS2812 LED grid, in the colour and
+//! brightness a client connected over USB serial or BLE asks for. See
+//! `protocol.rs` for the command set, `ntp.rs` for Syncing, `settings.rs` for the TZ Rule and
 //! `wifi.rs` for Rejoining the Saved Network, `link_key.rs` for the Link Key,
 //! and `factory_reset.rs` for the Factory Reset.
 
@@ -73,13 +73,6 @@ const BAR_HEIGHT: usize = 3;
 
 type DisplayGrid<'d> = grid::Grid<'d, GRID_WIDTH, { GRID_WIDTH * GRID_WIDTH }>;
 
-/// What the grid is currently showing: the Wall Clock, or a client-set
-/// string held as its four digits (colon is implicit, same position always).
-enum DisplayMode {
-    Clock,
-    Text([u8; 4]),
-}
-
 /// One frame in the fixed clock layout: four cells (`None` draws a dash)
 /// and whether the colon is lit.
 #[derive(Clone, Copy, PartialEq)]
@@ -135,19 +128,13 @@ fn render(grid: &mut DisplayGrid, frame: Frame, hold: Hold) {
     }
 }
 
-/// What `mode` shows at `now` given the last Sync (`boot_utc_ms`, see
+/// The Wall Clock at `now` given the last Sync (`boot_utc_ms`, see
 /// `ntp::WALL_CLOCK`) and the TZ Rule, and when that next changes on its own
-/// — `None` if only a Command, a Sync or a `TZ` can change it.
-fn frame_at(
-    mode: &DisplayMode,
-    boot_utc_ms: Option<u64>,
-    tz: &TzRule,
-    now: Instant,
-) -> (Frame, Option<Instant>) {
-    match (mode, boot_utc_ms) {
-        (DisplayMode::Text(digits), _) => (Frame::digits(*digits, true), None),
-        (DisplayMode::Clock, None) => (UNSYNCED, None),
-        (DisplayMode::Clock, Some(boot_utc_ms)) => {
+/// — `None` while Unsynced, when only a Sync can change it.
+fn frame_at(boot_utc_ms: Option<u64>, tz: &TzRule, now: Instant) -> (Frame, Option<Instant>) {
+    match boot_utc_ms {
+        None => (UNSYNCED, None),
+        Some(boot_utc_ms) => {
             let utc_ms = ntp::utc_ms(boot_utc_ms, now);
             let face = wall_clock::face(tz.local_ms(utc_ms));
             // DST transitions land on whole seconds, so on a colon toggle too.
@@ -155,14 +142,6 @@ fn frame_at(
             (Frame::digits(face.digits, face.colon), Some(next))
         }
     }
-}
-
-/// Parses the validated `DD:DD` string from [`protocol::Command::Text`] into
-/// its four digits. `protocol::parse_line` already checked the shape, so the
-/// digit arithmetic here can't fail.
-fn text_digits(s: &str) -> [u8; 4] {
-    let b = s.as_bytes();
-    [b[0] - b'0', b[1] - b'0', b[3] - b'0', b[4] - b'0']
 }
 
 #[embassy_executor::main]
@@ -322,12 +301,11 @@ async fn main(spawner: Spawner) {
         let mut tz_changes = unwrap!(settings::TZ_RULE.receiver());
         let mut boot_utc_ms: Option<u64> = None;
         let mut tz = settings::current_tz();
-        let mut mode = DisplayMode::Clock;
         let mut hold = Hold::Idle;
         let mut shown: Option<(Frame, Hold)> = None;
 
         loop {
-            let (frame, next_change) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
+            let (frame, next_change) = frame_at(boot_utc_ms, &tz, Instant::now());
             if shown != Some((frame, hold)) {
                 render(&mut grd, frame, hold);
                 grd.update().await;
@@ -352,14 +330,12 @@ async fn main(spawner: Spawner) {
                 Either5::First(()) => {}
                 Either5::Second(command) => {
                     match command {
-                        protocol::Command::Clock => mode = DisplayMode::Clock,
-                        protocol::Command::Text(s) => mode = DisplayMode::Text(text_digits(&s)),
                         protocol::Command::Color(c) => grd.set_foreground(c),
                         protocol::Command::Brightness(b) => grd.set_brightness(b),
                     }
-                    // Always redrawn, even if the frame is unchanged (e.g.
-                    // `COLOR`), and before the ack so `OK` means it's shown.
-                    let (frame, _) = frame_at(&mode, boot_utc_ms, &tz, Instant::now());
+                    // Always redrawn, even though the frame is unchanged,
+                    // and before the ack so `OK` means it's shown.
+                    let (frame, _) = frame_at(boot_utc_ms, &tz, Instant::now());
                     render(&mut grd, frame, hold);
                     grd.update().await;
                     shown = Some((frame, hold));

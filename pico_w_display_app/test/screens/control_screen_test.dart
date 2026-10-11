@@ -76,19 +76,14 @@ void main() {
     );
   });
 
-  testWidgets('TEXT sends the entered text and shows the reply inline', (
+  testWidgets('Set color sends COLOR and shows the reply inline', (
     tester,
   ) async {
     await pumpScreen(tester);
 
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Show text'),
-      '12:34',
-    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Set color'));
     await tester.pump();
-    await tester.tap(find.widgetWithText(FilledButton, 'Show'));
-    await tester.pump();
-    expect(link.written, ['TEXT 12:34']);
+    expect(link.written, ['COLOR 00008B']);
     expect(find.text('Sending…'), findsOneWidget);
 
     link.reply('OK\n');
@@ -97,35 +92,11 @@ void main() {
     expect(find.text('OK'), findsOneWidget);
   });
 
-  testWidgets('the TEXT field filters out what the display cannot draw', (
-    tester,
-  ) async {
+  testWidgets('there is no TEXT field or Resume clock button', (tester) async {
     await pumpScreen(tester);
 
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Show text'),
-      'ab12:345',
-    );
-    await tester.pump();
-
-    expect(
-      tester
-          .widget<TextField>(find.widgetWithText(TextField, 'Show text'))
-          .controller!
-          .text,
-      '12:34',
-    );
-  });
-
-  testWidgets('Resume clock sends a bare CLOCK', (tester) async {
-    await pumpScreen(tester);
-
-    await tester.tap(find.text('Resume clock'));
-    await tester.pump();
-
-    expect(link.written, ['CLOCK']);
-    link.reply('OK\n');
-    await tester.pump();
+    expect(find.widgetWithText(TextField, 'Show text'), findsNothing);
+    expect(find.text('Resume clock'), findsNothing);
   });
 
   testWidgets('WIFI shows ERR inline and clears the masked password', (

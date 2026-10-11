@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../ble/ble_central.dart';
 import '../ble/command_client.dart';
@@ -43,8 +42,6 @@ class ControlScreen extends StatefulWidget {
 class _ControlScreenState extends State<ControlScreen> {
   late final CommandClient _client = CommandClient(widget.link);
 
-  late final _textSender = _Sender(_client);
-  late final _clockSender = _Sender(_client);
   late final _colorSender = _Sender(_client);
   late final _brightnessSender = _Sender(_client);
   late final _wifiSender = _Sender(_client);
@@ -66,8 +63,6 @@ class _ControlScreenState extends State<ControlScreen> {
     _lifecycle.dispose();
     _tzUpdater.dispose();
     for (final sender in [
-      _textSender,
-      _clockSender,
       _colorSender,
       _brightnessSender,
       _wifiSender,
@@ -86,22 +81,6 @@ class _ControlScreenState extends State<ControlScreen> {
       padding: const EdgeInsets.all(16),
       children: [
         _TzStatusLine(_tzUpdater.status),
-        _Section(
-          title: 'Message',
-          children: [
-            _TextControl(sender: _textSender),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: () => _clockSender.send(const ResumeClock()),
-                icon: const Icon(Icons.schedule),
-                label: const Text('Resume clock'),
-              ),
-            ),
-            _OutcomeLine(_clockSender),
-          ],
-        ),
         _Section(
           title: 'Color',
           children: [_ColorControl(sender: _colorSender)],
@@ -340,78 +319,6 @@ class _Section extends StatelessWidget {
         ],
       ),
     ),
-  );
-}
-
-/// `TEXT`: the display can only draw `DD:DD`, so the field only takes
-/// digits and a colon, five characters at most.
-class _TextControl extends StatefulWidget {
-  const _TextControl({required this.sender});
-
-  final _Sender sender;
-
-  @override
-  State<_TextControl> createState() => _TextControlState();
-}
-
-class _TextControlState extends State<_TextControl> {
-  final _field = TextEditingController();
-
-  @override
-  void dispose() {
-    _field.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _field,
-    builder: (context, _) {
-      final text = _field.text;
-      final error = text.isEmpty ? null : textArgError(text);
-      final canSend = text.isNotEmpty && error == null;
-      // Checked on use: this builder doesn't rebuild when [busy] changes.
-      void send() {
-        if (!widget.sender.busy) widget.sender.send(SetText(text));
-      }
-
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _field,
-                  decoration: InputDecoration(
-                    labelText: 'Show text',
-                    hintText: '12:34',
-                    errorText: error,
-                  ),
-                  keyboardType: TextInputType.datetime,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp('[0-9:]')),
-                    LengthLimitingTextInputFormatter(5),
-                  ],
-                  onSubmitted: canSend ? (_) => send() : null,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: _SendButton(
-                  sender: widget.sender,
-                  label: 'Show',
-                  onPressed: canSend ? send : null,
-                ),
-              ),
-            ],
-          ),
-          _OutcomeLine(widget.sender),
-        ],
-      );
-    },
   );
 }
 

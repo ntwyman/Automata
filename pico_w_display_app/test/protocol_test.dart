@@ -4,8 +4,6 @@ import 'package:pico_w_display_app/protocol.dart';
 void main() {
   group('encodeCommand', () {
     test('writes each Command as the line the firmware parses', () {
-      expect(encodeCommand(const SetText('12:34')), 'TEXT 12:34');
-      expect(encodeCommand(const ResumeClock()), 'CLOCK');
       expect(encodeCommand(const SetColor(0xff, 0x00, 0xaa)), 'COLOR FF00AA');
       expect(encodeCommand(const SetColor(1, 2, 3)), 'COLOR 010203');
       expect(encodeCommand(const SetBrightness(200)), 'BRIGHTNESS 200');
@@ -24,8 +22,6 @@ void main() {
 
     test('every encoded Command parses back to itself', () {
       const commands = <Command>[
-        SetText('09:05'),
-        ResumeClock(),
         SetColor(0x12, 0xab, 0xef),
         SetBrightness(0),
         SetBrightness(255),
@@ -43,8 +39,8 @@ void main() {
 
   group('parseCommand', () {
     test('accepts command names in any case and trims the line', () {
-      expect(parseCommand('  clock \r'), const ResumeClock());
-      expect(parseCommand('Text 12:34'), const SetText('12:34'));
+      expect(parseCommand('  time \r'), const QueryTime());
+      expect(parseCommand('Color ff00aa'), const SetColor(0xff, 0x00, 0xaa));
       expect(parseCommand('reset'), const FactoryReset());
     });
 
@@ -75,20 +71,14 @@ void main() {
       expect(() => parseCommand('TZ  '), throwsProtocolError('bad args'));
     });
 
-    test('TEXT takes exactly a DD:DD shape', () {
-      expect(parseCommand('TEXT 00:59'), const SetText('00:59'));
-      expect(() => parseCommand('TEXT 1234'), throwsProtocolError('bad args'));
+    test('TEXT and CLOCK are gone', () {
       expect(
-        () => parseCommand('TEXT 12:345'),
-        throwsProtocolError('bad args'),
+        () => parseCommand('TEXT 12:34'),
+        throwsProtocolError('unknown command'),
       );
       expect(
-        () => parseCommand('TEXT ab:34'),
-        throwsProtocolError('unsupported char'),
-      );
-      expect(
-        () => parseCommand('TEXT 12-34'),
-        throwsProtocolError('unsupported char'),
+        () => parseCommand('CLOCK'),
+        throwsProtocolError('unknown command'),
       );
     });
 
@@ -156,12 +146,6 @@ void main() {
   });
 
   group('validation for the control screen', () {
-    test('textArgError accepts DD:DD and explains anything else', () {
-      expect(textArgError('12:34'), isNull);
-      expect(textArgError('12:3'), isNotNull);
-      expect(textArgError('1a:34'), isNotNull);
-    });
-
     test('ssidError rejects what the grammar cannot carry', () {
       expect(ssidError('home'), isNull);
       expect(ssidError(''), isNotNull);

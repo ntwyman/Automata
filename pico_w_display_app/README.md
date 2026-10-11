@@ -1,6 +1,6 @@
 # pico_w_display_app
 
-Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, fetches its Link Key (`KEY`), sends it Commands (`TEXT`, `CLOCK`, `COLOR`, `BRIGHTNESS`, `WIFI`, `RESET`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Claimed, Factory Reset, …) follow `../pico_w_display/CONTEXT.md`.
+Flutter (iOS + Android) companion app for the `pico_w_display` firmware: pairs with the display over BLE, reconnects to it automatically on later launches, fetches its Link Key (`KEY`), sends it Commands (`COLOR`, `BRIGHTNESS`, `WIFI`, `RESET`), and keeps the display's TZ Rule on the phone's timezone (`TZ`, `TIME`). Domain terms (Pairing, Bond, Claimed, Factory Reset, …) follow `../pico_w_display/CONTEXT.md`.
 
 ## Layout
 
@@ -59,7 +59,7 @@ If Pairing fails after the display was Factory Reset or paired with another phon
 
 Against a real, bonded display:
 
-1. Message: `12:34` → Show: the display shows 12:34 and the app shows `OK`. Resume clock: the clock returns, `OK`.
+1. The display shows the Wall Clock, and the control screen has no Message section (no text field, no Resume clock).
 2. Color: pick a preset or adjust R/G/B → Set color: the glyphs change color, `OK`.
 3. Brightness: drag and release the slider: the display dims/brightens, `OK`.
 4. Wi-Fi: a correct SSID/password → `OK <address>`. Then a deliberately wrong password → `ERR wifi join failed` (or `ERR wifi join timed out`), and the password field is cleared. Check `flutter run`'s console and the platform logs (`adb logcat` / Xcode console) contain no trace of either password.

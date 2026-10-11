@@ -38,10 +38,10 @@ void main() {
   });
 
   test('matches replies to Commands in the order they were sent', () async {
-    final first = client.send(const ResumeClock());
+    final first = client.send(const SetBrightness(10));
     final second = client.send(const JoinWifi('home', 'pw'));
     await pumpEventQueue();
-    expect(link.written, ['CLOCK', 'WIFI home pw']);
+    expect(link.written, ['BRIGHTNESS 10', 'WIFI home pw']);
 
     link.reply('OK\n');
     link.reply('OK 10.0.0.5\n');
@@ -55,7 +55,7 @@ void main() {
     () async {
       link.replyDuringWrite = 'OK\n';
 
-      expect(await client.send(const ResumeClock()), const ReplyOk());
+      expect(await client.send(const SetBrightness(10)), const ReplyOk());
     },
   );
 
@@ -64,7 +64,7 @@ void main() {
     () async {
       link.failNextWrite = true;
       await expectLater(
-        client.send(const ResumeClock()),
+        client.send(const SetBrightness(10)),
         throwsA(isA<Exception>()),
       );
 
@@ -77,7 +77,7 @@ void main() {
   );
 
   test('a garbled reply fails only its own Command', () async {
-    final reply = client.send(const ResumeClock());
+    final reply = client.send(const SetBrightness(10));
     await pumpEventQueue();
 
     link.reply('HELLO\n');
@@ -88,7 +88,7 @@ void main() {
   test('a reply that never comes times out', () {
     fakeAsync((async) {
       Object? error;
-      client.send(const ResumeClock()).catchError((Object e) {
+      client.send(const SetBrightness(10)).catchError((Object e) {
         error = e;
         return const ReplyOk();
       });
@@ -118,7 +118,7 @@ void main() {
   test('a late reply to a timed-out Command is not taken for the next one', () {
     fakeAsync((async) {
       client
-          .send(const ResumeClock())
+          .send(const SetBrightness(10))
           .catchError((Object _) => const ReplyOk());
       async.elapse(const Duration(seconds: 6));
 
@@ -136,7 +136,7 @@ void main() {
   });
 
   test('a dropped link fails every Command still waiting', () async {
-    final reply = client.send(const ResumeClock());
+    final reply = client.send(const SetBrightness(10));
     await pumpEventQueue();
 
     link.drop();
@@ -149,7 +149,7 @@ void main() {
     await pumpEventQueue();
 
     await expectLater(
-      client.send(const ResumeClock()),
+      client.send(const SetBrightness(10)),
       throwsA(isA<LinkDropped>()),
     );
     expect(link.written, isEmpty);

@@ -200,11 +200,6 @@ impl Default for DisplayMailbox {
 /// A parsed, fully-validated client command. By the time one of these exists,
 /// it is safe to apply directly to the display with no further checks.
 pub enum Command {
-    /// Render this exact 5-character `DD:DD`-shaped string with the existing
-    /// digit/colon font, replacing the clock until [`Command::Clock`] is sent.
-    Text(String<5>),
-    /// Resume showing the Wall Clock.
-    Clock,
     /// Set the foreground color used to draw glyphs.
     Color(RGB8),
     /// Set overall LED brightness (0-255).
@@ -263,11 +258,7 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
-    if cmd.eq_ignore_ascii_case("TEXT") {
-        parse_text(rest).map(ParsedLine::Display)
-    } else if cmd.eq_ignore_ascii_case("CLOCK") {
-        Ok(ParsedLine::Display(Command::Clock))
-    } else if cmd.eq_ignore_ascii_case("COLOR") {
+    if cmd.eq_ignore_ascii_case("COLOR") {
         parse_color(rest).map(ParsedLine::Display)
     } else if cmd.eq_ignore_ascii_case("BRIGHTNESS") {
         parse_brightness(rest).map(ParsedLine::Display)
@@ -295,28 +286,6 @@ fn parse_line(line: &str) -> Result<ParsedLine, ProtocolError> {
     } else {
         Err(ProtocolError::UnknownCommand)
     }
-}
-
-/// `DD:DD` — same 5-character layout the clock already draws (two digits, a
-/// colon, two digits), just with client-supplied digits.
-fn parse_text(s: &str) -> Result<Command, ProtocolError> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 5 {
-        return Err(ProtocolError::BadArgs);
-    }
-    for (i, &b) in bytes.iter().enumerate() {
-        let ok = if i == 2 {
-            b == b':'
-        } else {
-            b.is_ascii_digit()
-        };
-        if !ok {
-            return Err(ProtocolError::UnsupportedChar);
-        }
-    }
-    let mut text = String::new();
-    text.push_str(s).map_err(|_| ProtocolError::BadArgs)?;
-    Ok(Command::Text(text))
 }
 
 /// `RRGGBB` hex color.
@@ -835,26 +804,13 @@ mod tests {
     }
 
     #[test]
-    fn text_valid() {
-        assert_eq!(run("TEXT 12:34\n", ok_wifi()), "OK\n");
+    fn text_is_unknown() {
+        assert_eq!(run("TEXT 12:34\n", ok_wifi()), "ERR unknown command\n");
     }
 
     #[test]
-    fn text_malformed_wrong_length() {
-        assert_eq!(run("TEXT 1234\n", ok_wifi()), "ERR bad args\n");
-    }
-
-    #[test]
-    fn text_malformed_bad_char() {
-        assert_eq!(
-            run("TEXT ab:34\n", ok_wifi()),
-            "ERR unsupported char\n"
-        );
-    }
-
-    #[test]
-    fn clock_valid() {
-        assert_eq!(run("CLOCK\n", ok_wifi()), "OK\n");
+    fn clock_is_unknown() {
+        assert_eq!(run("CLOCK\n", ok_wifi()), "ERR unknown command\n");
     }
 
     #[test]
@@ -962,7 +918,7 @@ mod tests {
 
     #[test]
     fn other_commands_do_not_reset() {
-        let (_, requests) = run_reset("CLOCK\nFORGET\nTIME\nBOGUS\n");
+        let (_, requests) = run_reset("COLOR ff00aa\nFORGET\nTIME\nBOGUS\n");
         assert!(requests.is_empty());
     }
 
@@ -1115,7 +1071,7 @@ mod tests {
     #[test]
     fn other_commands_work_off_ble() {
         assert_eq!(
-            run_key("CLOCK\nKEY\nTZ EST5\n", Transport::Usb, Some(KEY)),
+            run_key("COLOR ff00aa\nKEY\nTZ EST5\n", Transport::Usb, Some(KEY)),
             "OK\nERR not allowed\nOK\n"
         );
     }
@@ -1145,7 +1101,7 @@ mod tests {
     #[test]
     fn non_ascii_line_then_valid_command() {
         assert_eq!(
-            run_bytes(b"abc\xe9\nCLOCK\n", ok_wifi()),
+            run_bytes(b"abc\xe9\nCOLOR ff00aa\n", ok_wifi()),
             "ERR unsupported char\nOK\n"
         );
     }
@@ -1163,7 +1119,7 @@ mod tests {
     #[test]
     fn non_ascii_only_line() {
         assert_eq!(
-            run_bytes(b"\xe9\xe9\nCLOCK\n", ok_wifi()),
+            run_bytes(b"\xe9\xe9\nCOLOR ff00aa\n", ok_wifi()),
             "ERR unsupported char\nOK\n"
         );
     }
@@ -1182,7 +1138,7 @@ mod tests {
 
     #[test]
     fn line_too_long_with_non_ascii() {
-        let mut line = b"TEXT \xe9".to_vec();
+        let mut line = b"COLOR \xe9".to_vec();
         line.extend(core::iter::repeat_n(b'9', 200));
         line.push(b'\n');
         assert_eq!(
@@ -1193,7 +1149,7 @@ mod tests {
 
     #[test]
     fn line_too_long() {
-        let long_line = "TEXT ".to_string() + &"9".repeat(200) + "\n";
+        let long_line = "COLOR ".to_string() + &"9".repeat(200) + "\n";
         assert_eq!(run(&long_line, ok_wifi()), "ERR line too long\n");
     }
 
@@ -1206,7 +1162,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq)]
     enum Event {
-        /// The display finished drawing this `TEXT` value.
+        /// The display finished drawing this `COLOR` value.
         Shown(std::string::String),
         /// This Session wrote an `OK` reply.
         Replied(usize),
@@ -1216,20 +1172,20 @@ mod tests {
 
     type Log = core::cell::RefCell<std::vec::Vec<Event>>;
 
-    /// One Session's client: which `TEXT` values it sends, how many polls it
+    /// One Session's client: which `COLOR` values it sends, how many polls it
     /// waits before its first byte, and whether its Transport fails on
     /// write.
     struct Client {
-        texts: std::vec::Vec<std::string::String>,
+        colors: std::vec::Vec<std::string::String>,
         start_delay: usize,
         fail_writes: bool,
     }
 
     impl Client {
-        /// `count` distinct `TEXT` values, unique to `session`.
+        /// `count` distinct `COLOR` values, unique to `session`.
         fn new(session: usize, count: usize, start_delay: usize) -> Self {
             Client {
-                texts: (0..count).map(|k| std::format!("{session}{k}:00")).collect(),
+                colors: (0..count).map(|k| std::format!("{session:02x}{k:02x}00")).collect(),
                 start_delay,
                 fail_writes: false,
             }
@@ -1335,8 +1291,8 @@ mod tests {
             let (log, display) = (&log, &display);
             async move {
                 let mut bytes = std::vec::Vec::new();
-                for text in &client.texts {
-                    bytes.extend_from_slice(std::format!("TEXT {text}\n").as_bytes());
+                for color in &client.colors {
+                    bytes.extend_from_slice(std::format!("COLOR {color}\n").as_bytes());
                 }
                 let reader = SlowReader {
                     bytes,
@@ -1377,13 +1333,14 @@ mod tests {
 
         let fake_display = async {
             loop {
-                let Command::Text(text) = display.receive().await else {
-                    panic!("only TEXT is sent here");
+                let Command::Color(c) = display.receive().await else {
+                    panic!("only COLOR is sent here");
                 };
+                let color = std::format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
                 for _ in 0..draw_polls {
                     embassy_futures::yield_now().await;
                 }
-                log.borrow_mut().push(Event::Shown(text.as_str().into()));
+                log.borrow_mut().push(Event::Shown(color));
                 display.ack().await;
             }
         };
@@ -1402,26 +1359,26 @@ mod tests {
             .collect()
     }
 
-    /// Asserts each of `session`'s `texts` got exactly one `OK`, and that
-    /// the k-th `OK` came after the display showed the k-th text.
-    fn assert_replies_follow_own_commands(log: &[Event], session: usize, texts: &[std::string::String]) {
+    /// Asserts each of `session`'s `colors` got exactly one `OK`, and that
+    /// the k-th `OK` came after the display showed the k-th color.
+    fn assert_replies_follow_own_commands(log: &[Event], session: usize, colors: &[std::string::String]) {
         let replies = positions(log, &Event::Replied(session));
-        assert_eq!(replies.len(), texts.len(), "session {session}: one reply per Command\n{log:#?}");
-        for (text, &reply_at) in texts.iter().zip(&replies) {
-            let shown = positions(log, &Event::Shown(text.clone()));
-            assert_eq!(shown.len(), 1, "{text} shown exactly once\n{log:#?}");
+        assert_eq!(replies.len(), colors.len(), "session {session}: one reply per Command\n{log:#?}");
+        for (color, &reply_at) in colors.iter().zip(&replies) {
+            let shown = positions(log, &Event::Shown(color.clone()));
+            assert_eq!(shown.len(), 1, "{color} shown exactly once\n{log:#?}");
             assert!(
                 shown[0] < reply_at,
-                "session {session} replied OK before {text} was shown\n{log:#?}"
+                "session {session} replied OK before {color} was shown\n{log:#?}"
             );
         }
     }
 
     fn assert_pair_ok(usb: Client, ble: Client, draw_polls: usize) {
-        let (usb_texts, ble_texts) = (usb.texts.clone(), ble.texts.clone());
+        let (usb_colors, ble_colors) = (usb.colors.clone(), ble.colors.clone());
         let log = run_pair(usb, ble, draw_polls);
-        assert_replies_follow_own_commands(&log, USB, &usb_texts);
-        assert_replies_follow_own_commands(&log, BLE, &ble_texts);
+        assert_replies_follow_own_commands(&log, USB, &usb_colors);
+        assert_replies_follow_own_commands(&log, BLE, &ble_colors);
     }
 
     #[test]
@@ -1452,7 +1409,7 @@ mod tests {
     #[test]
     fn failed_transport_waiting_for_turn_ends_and_other_session_continues() {
         let usb = Client::new(USB, 5, 0);
-        let usb_texts = usb.texts.clone();
+        let usb_colors = usb.colors.clone();
         let mut ble = Client::new(BLE, 3, 1);
         ble.fail_writes = true;
 
@@ -1470,6 +1427,6 @@ mod tests {
             .count();
         assert!(frames_before_end <= 2, "BLE outlived its turn\n{log:#?}");
         assert!(!log.contains(&Event::Replied(BLE)));
-        assert_replies_follow_own_commands(&log, USB, &usb_texts);
+        assert_replies_follow_own_commands(&log, USB, &usb_colors);
     }
 }

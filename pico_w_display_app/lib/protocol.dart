@@ -15,36 +15,6 @@ sealed class Command {
   const Command();
 }
 
-/// `TEXT DD:DD`: shows [text] in place of the clock until [ResumeClock].
-class SetText extends Command {
-  const SetText(this.text);
-
-  final String text;
-
-  @override
-  bool operator ==(Object other) => other is SetText && other.text == text;
-
-  @override
-  int get hashCode => text.hashCode;
-
-  @override
-  String toString() => 'SetText($text)';
-}
-
-/// Bare `CLOCK`: goes back to the clock.
-class ResumeClock extends Command {
-  const ResumeClock();
-
-  @override
-  bool operator ==(Object other) => other is ResumeClock;
-
-  @override
-  int get hashCode => (ResumeClock).hashCode;
-
-  @override
-  String toString() => 'ResumeClock()';
-}
-
 /// `COLOR RRGGBB`: the color glyphs are drawn in, each channel 0–255.
 class SetColor extends Command {
   const SetColor(this.red, this.green, this.blue);
@@ -169,8 +139,6 @@ class FetchLinkKey extends Command {
 /// The line the firmware parses back into [command]. Assumes [command]'s
 /// fields are already in range (see the `*Error` validators below).
 String encodeCommand(Command command) => switch (command) {
-  SetText(:final text) => 'TEXT $text',
-  ResumeClock() => 'CLOCK',
   SetColor(:final red, :final green, :final blue) =>
     'COLOR ${_hex(red)}${_hex(green)}${_hex(blue)}',
   SetBrightness(:final level) => 'BRIGHTNESS $level',
@@ -191,7 +159,6 @@ class ProtocolError implements Exception {
 
   static const unknownCommand = ProtocolError('unknown command');
   static const badArgs = ProtocolError('bad args');
-  static const unsupportedChar = ProtocolError('unsupported char');
 
   final String reason;
 
@@ -205,8 +172,6 @@ class ProtocolError implements Exception {
 Command parseCommand(String line) {
   final (name, rest) = _splitFirstSpace(line.trim());
   return switch (name.toUpperCase()) {
-    'TEXT' => _parseText(rest.trim()),
-    'CLOCK' => const ResumeClock(),
     'COLOR' => _parseColor(rest.trim()),
     'BRIGHTNESS' => _parseBrightness(rest.trim()),
     'WIFI' => _parseWifi(rest.trim()),
@@ -224,14 +189,6 @@ Command parseCommand(String line) {
   final i = s.indexOf(' ');
   return i < 0 ? (s, '') : (s.substring(0, i), s.substring(i + 1));
 }
-
-Command _parseText(String s) {
-  if (s.length != 5) throw ProtocolError.badArgs;
-  if (!_textShape.hasMatch(s)) throw ProtocolError.unsupportedChar;
-  return SetText(s);
-}
-
-final _textShape = RegExp(r'^[0-9]{2}:[0-9]{2}$');
 
 // Stricter than the firmware in one corner: Rust's `u8::from_str_radix`
 // also takes a sign per byte pair (`+F+F+F`), which nothing should send.
@@ -276,10 +233,6 @@ const maxPasswordLength = 63;
 // below hold user input to that, and to what the grammar can carry, before
 // it's ever encoded.
 final _printableAscii = RegExp(r'^[\x20-\x7e]*$');
-
-/// Why [text] can't be a `TEXT` argument, or `null` if it can.
-String? textArgError(String text) =>
-    _textShape.hasMatch(text) ? null : 'Use the form 12:34 — digits only.';
 
 /// Why [ssid] can't be sent in a `WIFI` Command, or `null` if it can.
 String? ssidError(String ssid) {
